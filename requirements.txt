@@ -1,0 +1,25 @@
+# PiiScanner Python 의존성
+# pip install -r requirements.txt
+
+# 문서 추출
+python-docx>=1.1.0       # .docx
+openpyxl>=3.1.0          # .xlsx
+python-pptx>=0.6.23      # .pptx
+pdfplumber>=0.11.0       # .pdf (텍스트 추출)
+pypdf>=4.0.0             # .pdf (fallback)
+olefile>=0.47            # .doc/.xls/.ppt (구버전 Office)
+
+# 이미지 OCR
+pytesseract>=0.3.10      # Tesseract OCR 래퍼
+Pillow>=10.0.0           # 이미지 처리
+
+# HWP
+hwp5==0.1.0              # .hwp 파일 (선택, 실패 시 무시됨)
+
+# 결과 출력
+xlsxwriter>=3.1.0        # Excel 리포트
+
+# 유틸
+tqdm>=4.66.0             # 진행바
+chardet>=5.2.0           # 인코딩 감지
+colorama>=0.4.6          # 컬러 콘솔 출력 (Windows)

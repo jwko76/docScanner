@@ -1,0 +1,51 @@
+# ──── 빌드 산출물 ────────────────────────────────────────────────
+build/
+out/
+*.exe
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+!sdk/*.lib
+
+# ──── 리포트 출력 (스캔 결과 - 개인정보 포함 가능) ───────────────
+reports/
+*.xlsx
+*.html
+
+# ──── Everything SDK DLL (재배포 불가) ──────────────────────────
+sdk/Everything64.dll
+sdk/Everything32.dll
+Everything64.dll
+Everything32.dll
+
+# ──── Python ────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+.eggs/
+.venv/
+venv/
+env/
+
+# ──── IDE ────────────────────────────────────────────────────────
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+.DS_Store
+Thumbs.db
+
+# ──── 임시 파일 ──────────────────────────────────────────────────
+*.tmp
+*.log
+PiiScanTmp_*/
+
+# ──── vcpkg ──────────────────────────────────────────────────────
+vcpkg_installed/
