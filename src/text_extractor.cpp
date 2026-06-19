@@ -12,6 +12,8 @@
 #include <windows.h>
 #include <filter.h>       // IFilter, STAT_CHUNK
 #include <filterr.h>      // FILTER_E_*
+// LoadIFilter is in query.lib; forward-declare since its header location varies by SDK version
+extern "C" HRESULT __stdcall LoadIFilter(LPCWSTR pwcsPath, IUnknown* pUnkOuter, void** ppIUnk);
 #include <shlwapi.h>
 #include <objbase.h>
 
@@ -23,6 +25,7 @@
 #include <winrt/Windows.Storage.h>
 #include <winrt/Windows.Storage.Streams.h>
 #include <winrt/Windows.Globalization.h>
+#include <winrt/Windows.Foundation.Collections.h>  // begin()/end() for IVectorView range-for
 
 #include <fstream>
 #include <sstream>

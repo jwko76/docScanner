@@ -2,6 +2,7 @@
 // reporter.h
 // 스캔 결과를 Excel(.xlsx) + HTML 리포트로 출력
 
+#include <windows.h>   // LONGLONG
 #include "pii_detector.h"
 #include <string>
 #include <vector>

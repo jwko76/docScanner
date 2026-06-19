@@ -2,6 +2,47 @@
 
 ---
 
+## 2026-06-19 (세션 4 — C++ 빌드 완성)
+
+### 요청 사항
+- C/C++ 실행 파일로 전환, 외부 라이브러리 의존성 제거
+- 빌드 테스트 → 오류 수정 → 문서 작성 → GitHub push
+
+### 수행 작업
+
+**의존성 제거**
+- `libxlsxwriter` 완전 제거 → `xlsx_writer.h` (순수 C++17, 헤더 전용) 로 대체
+- ZIP STORED + XML 직접 구현, CRC32 룩업 테이블 내장
+- `/MT` 정적 CRT 링크 (MSVCRT.dll 불필요)
+
+**빌드 오류 수정 (6개 파일)**
+
+| 파일 | 오류 | 수정 |
+|------|------|------|
+| `everything_scanner.h` | C3646: `FnEverything_*` 미정의 | `#include "Everything.h"` 추가 |
+| `reporter.h` | C2061: `LONGLONG` 미정의 | `#include <windows.h>` 추가 |
+| `main.cpp` | C3861: `PathRemoveFileSpecW` 미정의 | `#include <shlwapi.h>` 추가 |
+| `text_extractor.cpp` | C3861: `LoadIFilter` 미정의 | `extern "C"` forward declaration 추가 |
+| `text_extractor.cpp` | C2338: `/await` 폐기됨 | `/std:c++20`으로 변경 |
+| `text_extractor.cpp` | C3779: range-for `begin/end` 미정의 | `<winrt/Windows.Foundation.Collections.h>` 추가 |
+| `reporter.cpp` | C2065: raw string 조기 종료 | `LR"TAB(...)TAB"` 커스텀 구분자로 수정 |
+| `pii_detector.cpp` | C2039: `wregex_iterator` 미존재 | `wsregex_iterator`로 수정 (C++ 표준 이름) |
+
+**빌드 환경**
+- MSVC 19.51.36247 (VS18 Insiders)
+- Windows SDK 10.0.26100.0
+- `/std:c++20 /MT /O2 /utf-8`
+
+**빌드 결과**
+- `build\PiiScanner.exe` (716KB) 생성 성공
+- 실행 확인: `PiiScanner.exe --help` 정상 동작
+
+**문서 작성**
+- `USAGE.md`: CLI 옵션, 예시, 탐지 유형, 출력 형식
+- `STRUCTURE.md`: 모듈 구조, 데이터 흐름, 빌드 플래그
+
+---
+
 ## 2026-06-19 (세션 1)
 
 ### 요청 사항

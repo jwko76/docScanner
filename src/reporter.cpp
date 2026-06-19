@@ -2,7 +2,7 @@
 // Excel + HTML 리포트 생성
 
 #include "reporter.h"
-#include <xlsxwriter.h>   // vcpkg: libxlsxwriter
+#include "xlsx_writer.h"  // zero-dependency xlsx writer (no libxlsxwriter)
 #include <windows.h>
 #include <fstream>
 #include <sstream>
@@ -47,153 +47,125 @@ std::wstring Reporter::formatFileSize(LONGLONG bytes) {
 }
 
 // ============================================================
-// Excel 보고서 (libxlsxwriter)
+// Excel 보고서 (xlsx_writer.h – zero dependency)
 // ============================================================
 
 bool Reporter::saveExcel(const std::vector<FileScanResult>& results,
                           const ScanSummary& summary,
                           const std::wstring& outputPath) {
     std::string path = toUtf8(outputPath);
-    lxw_workbook* wb = workbook_new(path.c_str());
-    if (!wb) { m_lastError = L"Excel 파일 생성 실패: " + outputPath; return false; }
 
-    // ---- 서식 정의 ----
-    lxw_format* fmtHeader = workbook_add_format(wb);
-    format_set_bold(fmtHeader);
-    format_set_bg_color(fmtHeader, 0x2F5496);
-    format_set_font_color(fmtHeader, LXW_COLOR_WHITE);
-    format_set_align(fmtHeader, LXW_ALIGN_CENTER);
-    format_set_border(fmtHeader, LXW_BORDER_THIN);
-
-    lxw_format* fmtCell = workbook_add_format(wb);
-    format_set_border(fmtCell, LXW_BORDER_THIN);
-    format_set_text_wrap(fmtCell);
-
-    lxw_format* fmtCellRed = workbook_add_format(wb);
-    format_set_border(fmtCellRed, LXW_BORDER_THIN);
-    format_set_font_color(fmtCellRed, 0xC00000);
-    format_set_bold(fmtCellRed);
-
-    lxw_format* fmtTitle = workbook_add_format(wb);
-    format_set_bold(fmtTitle);
-    format_set_font_size(fmtTitle, 14);
-
-    lxw_format* fmtNum = workbook_add_format(wb);
-    format_set_border(fmtNum, LXW_BORDER_THIN);
-    format_set_align(fmtNum, LXW_ALIGN_RIGHT);
+    XlsxWriter wb;
 
     // ================================================================
     // 시트 1: 요약 (Summary)
     // ================================================================
-    lxw_worksheet* wsSummary = workbook_add_worksheet(wb, "요약");
-    worksheet_set_column(wsSummary, 0, 0, 25, nullptr);
-    worksheet_set_column(wsSummary, 1, 1, 40, nullptr);
+    int shSum = wb.addWorksheet(toUtf8(L"요약"));
+    wb.setColumnWidth(shSum, 0, 25.0);
+    wb.setColumnWidth(shSum, 1, 40.0);
 
     int row = 0;
-    worksheet_write_string(wsSummary, row, 0, "개인정보 스캔 결과 요약", fmtTitle);
+    wb.writeString(shSum, row, 0, toUtf8(L"개인정보 스캔 결과 요약"), XLFMT_TITLE);
     row += 2;
 
-    auto writeKV = [&](const char* key, const std::string& val) {
-        worksheet_write_string(wsSummary, row, 0, key, fmtHeader);
-        worksheet_write_string(wsSummary, row, 1, val.c_str(), fmtCell);
+    auto writeKV = [&](const std::wstring& key, const std::string& val) {
+        wb.writeString(shSum, row, 0, toUtf8(key), XLFMT_HEADER);
+        wb.writeString(shSum, row, 1, val,          XLFMT_CELL);
         ++row;
     };
 
-    writeKV("스캔 경로",    toUtf8(summary.scanPath));
-    writeKV("스캔 일시",    toUtf8(summary.scanTime));
-    writeKV("스캔 파일 수", std::to_string(summary.totalFilesScanned));
-    writeKV("개인정보 파일 수", std::to_string(summary.filesWithPii));
-    writeKV("개인정보 탐지 건수", std::to_string(summary.totalPiiFound));
-    writeKV("소요 시간",
-        std::to_string((int)summary.totalScanSec / 60) + "분 " +
-        std::to_string((int)summary.totalScanSec % 60) + "초");
+    writeKV(L"스캔 경로",       toUtf8(summary.scanPath));
+    writeKV(L"스캔 일시",       toUtf8(summary.scanTime));
+    writeKV(L"스캔 파일 수",    std::to_string(summary.totalFilesScanned));
+    writeKV(L"개인정보 파일 수",std::to_string(summary.filesWithPii));
+    writeKV(L"개인정보 탐지 건수", std::to_string(summary.totalPiiFound));
+    writeKV(L"소요 시간",
+        std::to_string((int)summary.totalScanSec / 60) + toUtf8(L"분 ") +
+        std::to_string((int)summary.totalScanSec % 60) + toUtf8(L"초"));
 
     row++;
-    worksheet_write_string(wsSummary, row, 0, "유형별 탐지 건수", fmtTitle);
+    wb.writeString(shSum, row, 0, toUtf8(L"유형별 탐지 건수"), XLFMT_TITLE);
     row++;
-    worksheet_write_string(wsSummary, row, 0, "유형", fmtHeader);
-    worksheet_write_string(wsSummary, row, 1, "건수", fmtHeader);
+    wb.writeString(shSum, row, 0, toUtf8(L"유형"), XLFMT_HEADER);
+    wb.writeString(shSum, row, 1, toUtf8(L"건수"), XLFMT_HEADER);
     row++;
 
-    for (const auto& [type, count] : summary.piiTypeCounts) {
-        if (count == 0) continue;
-        std::string typeName = toUtf8(PiiDetector::getTypeName(type));
-        worksheet_write_string(wsSummary, row, 0, typeName.c_str(), fmtCell);
-        worksheet_write_number(wsSummary, row, 1, count, fmtNum);
+    for (const auto& tc : summary.piiTypeCounts) {
+        if (tc.second == 0) continue;
+        wb.writeString(shSum, row, 0, toUtf8(PiiDetector::getTypeName(tc.first)), XLFMT_CELL);
+        wb.writeNumber(shSum, row, 1, tc.second, XLFMT_NUM);
         row++;
     }
 
     // ================================================================
     // 시트 2: 파일 목록 (Files)
     // ================================================================
-    lxw_worksheet* wsFiles = workbook_add_worksheet(wb, "파일 목록");
-    worksheet_set_column(wsFiles, 0, 0, 60, nullptr);  // 파일 경로
-    worksheet_set_column(wsFiles, 1, 1, 8,  nullptr);  // 확장자
-    worksheet_set_column(wsFiles, 2, 2, 10, nullptr);  // 탐지 건수
-    worksheet_set_column(wsFiles, 3, 3, 12, nullptr);  // 추출 방법
-    worksheet_set_column(wsFiles, 4, 4, 12, nullptr);  // 소요 시간
-    worksheet_set_column(wsFiles, 5, 5, 30, nullptr);  // 오류 메시지
+    int shFiles = wb.addWorksheet(toUtf8(L"파일 목록"));
+    wb.setColumnWidth(shFiles, 0, 60.0);
+    wb.setColumnWidth(shFiles, 1,  8.0);
+    wb.setColumnWidth(shFiles, 2, 10.0);
+    wb.setColumnWidth(shFiles, 3, 12.0);
+    wb.setColumnWidth(shFiles, 4, 12.0);
+    wb.setColumnWidth(shFiles, 5, 30.0);
 
-    const char* fileHeaders[] = {
-        "파일 경로", "확장자", "탐지 건수", "추출 방법", "소요(초)", "오류"
-    };
-    for (int c = 0; c < 6; ++c)
-        worksheet_write_string(wsFiles, 0, c, fileHeaders[c], fmtHeader);
+    wb.writeString(shFiles, 0, 0, toUtf8(L"파일 경로"),  XLFMT_HEADER);
+    wb.writeString(shFiles, 0, 1, toUtf8(L"확장자"),    XLFMT_HEADER);
+    wb.writeString(shFiles, 0, 2, toUtf8(L"탐지 건수"), XLFMT_HEADER);
+    wb.writeString(shFiles, 0, 3, toUtf8(L"추출 방법"), XLFMT_HEADER);
+    wb.writeString(shFiles, 0, 4, toUtf8(L"소요(초)"),  XLFMT_HEADER);
+    wb.writeString(shFiles, 0, 5, toUtf8(L"오류"),      XLFMT_HEADER);
 
     int fr = 1;
     for (const auto& r : results) {
-        lxw_format* rowFmt = (r.totalMatches() > 0) ? fmtCellRed : fmtCell;
-        worksheet_write_string(wsFiles, fr, 0, toUtf8(r.filePath).c_str(),    fmtCell);
-        worksheet_write_string(wsFiles, fr, 1, toUtf8(r.extension).c_str(),   fmtCell);
-        worksheet_write_number(wsFiles, fr, 2, r.totalMatches(),               rowFmt);
-        worksheet_write_string(wsFiles, fr, 3, toUtf8(r.extractionMethod).c_str(), fmtCell);
-        worksheet_write_number(wsFiles, fr, 4, r.scanTimeSec,                  fmtCell);
-        worksheet_write_string(wsFiles, fr, 5, toUtf8(r.extractionError).c_str(), fmtCell);
+        int cntFmt = (r.totalMatches() > 0) ? XLFMT_CELL_RED : XLFMT_NUM;
+        wb.writeString(shFiles, fr, 0, toUtf8(r.filePath),        XLFMT_CELL);
+        wb.writeString(shFiles, fr, 1, toUtf8(r.extension),       XLFMT_CELL);
+        wb.writeNumber(shFiles, fr, 2, r.totalMatches(),           cntFmt);
+        wb.writeString(shFiles, fr, 3, toUtf8(r.extractionMethod),XLFMT_CELL);
+        wb.writeNumber(shFiles, fr, 4, r.scanTimeSec,              XLFMT_CELL);
+        wb.writeString(shFiles, fr, 5, toUtf8(r.extractionError), XLFMT_CELL);
         ++fr;
     }
-
-    // 자동 필터
-    worksheet_autofilter(wsFiles, 0, 0, fr, 5);
+    wb.setAutoFilter(shFiles, 0, 0, fr, 5);
 
     // ================================================================
     // 시트 3: 상세 탐지 결과 (Detail)
     // ================================================================
-    lxw_worksheet* wsDetail = workbook_add_worksheet(wb, "상세 결과");
-    worksheet_set_column(wsDetail, 0, 0, 50, nullptr);  // 파일 경로
-    worksheet_set_column(wsDetail, 1, 1, 12, nullptr);  // 탐지 유형
-    worksheet_set_column(wsDetail, 2, 2, 20, nullptr);  // 탐지 값
-    worksheet_set_column(wsDetail, 3, 3, 20, nullptr);  // 마스킹 값
-    worksheet_set_column(wsDetail, 4, 4, 8,  nullptr);  // 줄 번호
-    worksheet_set_column(wsDetail, 5, 5, 60, nullptr);  // 맥락
-    worksheet_set_column(wsDetail, 6, 6, 8,  nullptr);  // 신뢰도
+    int shDetail = wb.addWorksheet(toUtf8(L"상세 결과"));
+    wb.setColumnWidth(shDetail, 0, 50.0);
+    wb.setColumnWidth(shDetail, 1, 12.0);
+    wb.setColumnWidth(shDetail, 2, 20.0);
+    wb.setColumnWidth(shDetail, 3, 20.0);
+    wb.setColumnWidth(shDetail, 4,  8.0);
+    wb.setColumnWidth(shDetail, 5, 60.0);
+    wb.setColumnWidth(shDetail, 6,  8.0);
 
-    const char* detailHeaders[] = {
-        "파일 경로", "탐지 유형", "탐지 값", "마스킹 값", "줄 번호", "맥락", "신뢰도"
-    };
-    for (int c = 0; c < 7; ++c)
-        worksheet_write_string(wsDetail, 0, c, detailHeaders[c], fmtHeader);
+    wb.writeString(shDetail, 0, 0, toUtf8(L"파일 경로"),  XLFMT_HEADER);
+    wb.writeString(shDetail, 0, 1, toUtf8(L"탐지 유형"),  XLFMT_HEADER);
+    wb.writeString(shDetail, 0, 2, toUtf8(L"탐지 값"),    XLFMT_HEADER);
+    wb.writeString(shDetail, 0, 3, toUtf8(L"마스킹 값"),  XLFMT_HEADER);
+    wb.writeString(shDetail, 0, 4, toUtf8(L"줄 번호"),    XLFMT_HEADER);
+    wb.writeString(shDetail, 0, 5, toUtf8(L"맥락"),       XLFMT_HEADER);
+    wb.writeString(shDetail, 0, 6, toUtf8(L"신뢰도"),     XLFMT_HEADER);
 
     int dr = 1;
     for (const auto& r : results) {
         for (const auto& m : r.matches) {
-            worksheet_write_string(wsDetail, dr, 0, toUtf8(r.filePath).c_str(),     fmtCell);
-            worksheet_write_string(wsDetail, dr, 1, toUtf8(m.typeName).c_str(),     fmtCellRed);
-            worksheet_write_string(wsDetail, dr, 2, toUtf8(m.matchedText).c_str(),  fmtCellRed);
-            worksheet_write_string(wsDetail, dr, 3, toUtf8(m.maskedText).c_str(),   fmtCell);
-            worksheet_write_number(wsDetail, dr, 4, m.lineNumber,                    fmtNum);
-            worksheet_write_string(wsDetail, dr, 5, toUtf8(m.contextSnippet).c_str(), fmtCell);
-            worksheet_write_number(wsDetail, dr, 6, m.confidence,                    fmtNum);
+            wb.writeString(shDetail, dr, 0, toUtf8(r.filePath),       XLFMT_CELL);
+            wb.writeString(shDetail, dr, 1, toUtf8(m.typeName),       XLFMT_CELL_RED);
+            wb.writeString(shDetail, dr, 2, toUtf8(m.matchedText),    XLFMT_CELL_RED);
+            wb.writeString(shDetail, dr, 3, toUtf8(m.maskedText),     XLFMT_CELL);
+            wb.writeNumber(shDetail, dr, 4, m.lineNumber,              XLFMT_NUM);
+            wb.writeString(shDetail, dr, 5, toUtf8(m.contextSnippet), XLFMT_CELL);
+            wb.writeNumber(shDetail, dr, 6, m.confidence,              XLFMT_NUM);
             ++dr;
         }
     }
-
-    worksheet_autofilter(wsDetail, 0, 0, dr, 6);
+    wb.setAutoFilter(shDetail, 0, 0, dr, 6);
 
     // 저장
-    lxw_error err = workbook_close(wb);
-    if (err) {
-        m_lastError = L"Excel 저장 실패 (오류코드=" +
-                       std::to_wstring(err) + L")";
+    if (!wb.save(path)) {
+        m_lastError = L"Excel 저장 실패: " + outputPath;
         return false;
     }
     return true;
@@ -285,12 +257,14 @@ std::wstring Reporter::buildHtmlPage(const std::vector<FileScanResult>& results,
     html << L"</div>\n";
 
     // ---- 탭 ----
-    html << LR"(<div style="margin-bottom:0">
+    // NOTE: Use named raw-string delimiter "TAB" because the HTML content
+    // contains )" (from onclick="switchTab(N)") which would prematurely close R"(...)".
+    html << LR"TAB(<div style="margin-bottom:0">
   <button class="tab-btn active" onclick="switchTab(0)">유형별 통계</button>
   <button class="tab-btn" onclick="switchTab(1)">파일 목록</button>
   <button class="tab-btn" onclick="switchTab(2)">상세 결과</button>
 </div>
-)";
+)TAB";
 
     // ---- 탭1: 유형별 통계 ----
     html << L"<div class=\"tab-panel active\" id=\"tab0\">\n";

@@ -1,6 +1,7 @@
 // pii_detector.cpp
 // 개인정보 탐지 패턴 구현
 
+#include <regex>           // std::wregex, std::wsregex_iterator (explicit include)
 #include "pii_detector.h"
 #include <algorithm>
 #include <numeric>
@@ -218,8 +219,8 @@ std::vector<PiiMatch> PiiDetector::detect(const std::wstring& text) {
         if (!isEnabled(pat.type)) continue;
         if (allMatches.size() >= m_maxMatches) break;
 
-        std::wregex_iterator it(text.begin(), text.end(), pat.pattern);
-        std::wregex_iterator end;
+        std::wsregex_iterator it(text.begin(), text.end(), pat.pattern);
+        std::wsregex_iterator end;
 
         for (; it != end && allMatches.size() < m_maxMatches; ++it) {
             const auto& m = *it;
@@ -389,8 +390,8 @@ std::vector<PiiMatch> PiiDetector::detectAddress(const std::wstring& text) {
         LR"([\s\S]{0,10}?(동|호|층)?)"
     );
 
-    std::wregex_iterator it(text.begin(), text.end(), addrPattern);
-    std::wregex_iterator end;
+    std::wsregex_iterator it(text.begin(), text.end(), addrPattern);
+    std::wsregex_iterator end;
 
     for (; it != end && results.size() < m_maxMatches / 10; ++it) {
         const auto& m = *it;

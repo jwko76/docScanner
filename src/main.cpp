@@ -19,6 +19,7 @@
 #define _WIN32_WINNT 0x0A00
 
 #include <windows.h>
+#include <shlwapi.h>   // PathRemoveFileSpecW
 #include <iostream>
 #include <string>
 #include <vector>

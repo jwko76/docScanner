@@ -69,9 +69,11 @@
   - tkinter 또는 PyQt6로 간단한 UI
   - 실시간 탐지 현황 테이블 업데이트
 
-- [ ] **C++ 빌드 자동화**
-  - `setup_cpp.bat`: vcpkg 설치 + cmake 빌드 자동화
-  - 릴리스 패키지: `PiiScanner_v1.0.zip` (exe + dll)
+- [x] **C++ 빌드 완성** (세션 4)
+  - 외부 라이브러리 의존성 제로 (xlsx_writer.h 자체 구현)
+  - `build.bat` 한 번 실행으로 `PiiScanner.exe` 생성
+  - 정적 CRT `/MT` → MSVCRT.dll 불필요
+  - 릴리스 패키지: `build\PiiScanner.exe` + `Everything64.dll`
 
 - [ ] **민감도 레벨 설정**
   - `--sensitivity high/medium/low`
@@ -110,7 +112,7 @@
 - [x] 신용카드 Luhn 알고리즘 검증
 - [x] IP 주소 유효성 필터
 - [x] 멀티스레드 병렬 스캔
-- [x] Excel 3시트 리포트 (xlsxwriter)
+- [x] Excel 3시트 리포트 (xlsx_writer.h — 의존성 제로 C++ 구현)
 - [x] HTML 대화형 리포트 (탭 + 차트 + 마스킹)
 - [x] CLI 인자 파싱 (`--path`, `--output`, `--skip-images` 등)
 - [x] 포터블 Python 단일 파일 (`pii_scanner.py`)

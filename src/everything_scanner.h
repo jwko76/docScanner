@@ -7,6 +7,7 @@
 #include <vector>
 #include <functional>
 #include <set>
+#include "Everything.h"  // FnEverything_* 함수 포인터 타입 정의
 
 // -------------------------
 // 파일 항목 구조체
