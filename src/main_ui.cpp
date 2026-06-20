@@ -660,12 +660,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             ShowWindow(hGrid,    sel == 1 ? SW_SHOW : SW_HIDE);
         }
 
-        // ListView 더블클릭 → 파일 열기
+        // ListView 더블클릭 → 파일 열기 + 탐색기에서 폴더 열기
         if (hdr->hwndFrom == hGrid && hdr->code == NM_DBLCLK) {
             int sel = ListView_GetNextItem(hGrid, -1, LVNI_SELECTED);
             if (sel >= 0 && sel < (int)g_gridPaths.size()) {
-                ShellExecuteW(hwnd, L"open",
-                    g_gridPaths[sel].c_str(), nullptr, nullptr, SW_SHOW);
+                const std::wstring& path = g_gridPaths[sel];
+                // 1) 소스 파일 직접 열기
+                ShellExecuteW(hwnd, L"open", path.c_str(), nullptr, nullptr, SW_SHOW);
+                // 2) 탐색기에서 해당 파일을 선택 상태로 폴더 열기
+                std::wstring arg = L"/select,\"" + path + L"\"";
+                ShellExecuteW(hwnd, L"open", L"explorer.exe",
+                    arg.c_str(), nullptr, SW_SHOW);
             }
         }
         return 0;
