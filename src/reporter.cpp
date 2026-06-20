@@ -128,16 +128,18 @@ bool Reporter::saveExcel(const std::vector<FileScanResult>& results,
     wb.setColumnWidth(shFiles, 0, 60.0);
     wb.setColumnWidth(shFiles, 1,  8.0);
     wb.setColumnWidth(shFiles, 2, 10.0);
-    wb.setColumnWidth(shFiles, 3, 12.0);
+    wb.setColumnWidth(shFiles, 3, 35.0);
     wb.setColumnWidth(shFiles, 4, 12.0);
-    wb.setColumnWidth(shFiles, 5, 30.0);
+    wb.setColumnWidth(shFiles, 5, 12.0);
+    wb.setColumnWidth(shFiles, 6, 30.0);
 
     wb.writeString(shFiles, 0, 0, toUtf8(L"파일 경로"),  XLFMT_HEADER);
     wb.writeString(shFiles, 0, 1, toUtf8(L"확장자"),    XLFMT_HEADER);
     wb.writeString(shFiles, 0, 2, toUtf8(L"탐지 건수"), XLFMT_HEADER);
-    wb.writeString(shFiles, 0, 3, toUtf8(L"추출 방법"), XLFMT_HEADER);
-    wb.writeString(shFiles, 0, 4, toUtf8(L"소요(초)"),  XLFMT_HEADER);
-    wb.writeString(shFiles, 0, 5, toUtf8(L"오류"),      XLFMT_HEADER);
+    wb.writeString(shFiles, 0, 3, toUtf8(L"탐지 유형"), XLFMT_HEADER);
+    wb.writeString(shFiles, 0, 4, toUtf8(L"추출 방법"), XLFMT_HEADER);
+    wb.writeString(shFiles, 0, 5, toUtf8(L"소요(초)"),  XLFMT_HEADER);
+    wb.writeString(shFiles, 0, 6, toUtf8(L"오류"),      XLFMT_HEADER);
 
     int fr = 1;
     for (const auto& r : results) {
@@ -148,12 +150,26 @@ bool Reporter::saveExcel(const std::vector<FileScanResult>& results,
         wb.writeHyperlink(shFiles, fr, 0, url, disp);
         wb.writeString(shFiles, fr, 1, toUtf8(r.extension),       XLFMT_CELL);
         wb.writeNumber(shFiles, fr, 2, r.totalMatches(),           cntFmt);
-        wb.writeString(shFiles, fr, 3, toUtf8(r.extractionMethod),XLFMT_CELL);
-        wb.writeNumber(shFiles, fr, 4, r.scanTimeSec,              XLFMT_CELL);
-        wb.writeString(shFiles, fr, 5, toUtf8(r.extractionError), XLFMT_CELL);
+
+        // 탐지 유형: 고유 유형 쉼표 구분 문자열
+        std::wstring typeList;
+        std::vector<PiiType> seenTypes;
+        for (const auto& m : r.matches) {
+            bool already = false;
+            for (auto t : seenTypes) if (t == m.type) { already = true; break; }
+            if (!already) {
+                seenTypes.push_back(m.type);
+                if (!typeList.empty()) typeList += L", ";
+                typeList += PiiDetector::getTypeName(m.type);
+            }
+        }
+        wb.writeString(shFiles, fr, 3, toUtf8(typeList),          cntFmt);
+        wb.writeString(shFiles, fr, 4, toUtf8(r.extractionMethod),XLFMT_CELL);
+        wb.writeNumber(shFiles, fr, 5, r.scanTimeSec,              XLFMT_CELL);
+        wb.writeString(shFiles, fr, 6, toUtf8(r.extractionError), XLFMT_CELL);
         ++fr;
     }
-    wb.setAutoFilter(shFiles, 0, 0, fr, 5);
+    wb.setAutoFilter(shFiles, 0, 0, fr, 6);
 
     // ================================================================
     // 시트 3: 상세 탐지 결과 (Detail)
@@ -313,13 +329,37 @@ std::wstring Reporter::buildHtmlPage(const std::vector<FileScanResult>& results,
     }
     html << L"</div></div></div>\n";
 
+    // 유형 → CSS 배지 클래스 매핑 (파일 목록 + 상세 결과 공통 사용)
+    auto typeBadge = [](PiiType t) -> std::wstring {
+        switch (t) {
+            case PiiType::RESIDENT_NUMBER: return L"badge-ssn";
+            case PiiType::PHONE_NUMBER:    return L"badge-phone";
+            case PiiType::EMAIL:           return L"badge-email";
+            case PiiType::IP_ADDRESS:      return L"badge-ip";
+            case PiiType::MAC_ADDRESS:     return L"badge-mac";
+            case PiiType::CREDIT_CARD:     return L"badge-card";
+            case PiiType::ADDRESS:         return L"badge-addr";
+            case PiiType::BANK_ACCOUNT:    return L"badge-bank";
+            default:                       return L"badge-other";
+        }
+    };
+
     // ---- 탭2: 파일 목록 ----
     html << L"<div class=\"tab-panel\" id=\"tab1\">\n";
     html << L"<div class=\"section\"><div class=\"section-header\">파일 목록</div>\n";
     html << L"<table><tr><th>파일 경로</th><th>확장자</th><th>탐지</th>"
-            L"<th>추출 방법</th><th>소요(초)</th><th>오류</th></tr>\n";
+            L"<th>탐지 유형</th><th>추출 방법</th><th>소요(초)</th><th>오류</th></tr>\n";
     for (const auto& r : results) {
         bool hit = r.totalMatches() > 0;
+
+        // 해당 파일에서 검출된 고유 PII 유형 수집 (순서 유지)
+        std::vector<PiiType> seenTypes;
+        for (const auto& m : r.matches) {
+            bool already = false;
+            for (auto t : seenTypes) if (t == m.type) { already = true; break; }
+            if (!already) seenTypes.push_back(m.type);
+        }
+
         html << L"<tr><td class=\"" << (hit ? L"file-hit" : L"file-ok") << L"\">"
              << L"<a href=\"" << pathToFileUrl(r.filePath)
              << L"\" title=\"" << htmlEscape(r.filePath) << L"\" style=\"color:inherit;text-decoration:underline dotted\">"
@@ -327,6 +367,12 @@ std::wstring Reporter::buildHtmlPage(const std::vector<FileScanResult>& results,
              << L"<td>" << htmlEscape(r.extension) << L"</td>"
              << L"<td class=\"" << (hit ? L"count-pos" : L"count-0") << L"\">"
              << r.totalMatches() << L"</td>"
+             << L"<td>";
+        for (PiiType t : seenTypes) {
+            html << L"<span class=\"badge " << typeBadge(t) << L"\">"
+                 << htmlEscape(PiiDetector::getTypeName(t)) << L"</span> ";
+        }
+        html << L"</td>"
              << L"<td>" << htmlEscape(r.extractionMethod) << L"</td>"
              << L"<td>" << std::fixed;
 
@@ -344,20 +390,6 @@ std::wstring Reporter::buildHtmlPage(const std::vector<FileScanResult>& results,
     html << L"<div class=\"section\"><div class=\"section-header\">상세 탐지 결과</div>\n";
     html << L"<table><tr><th>파일</th><th>유형</th><th>탐지 값</th>"
             L"<th>마스킹</th><th>줄</th><th>맥락</th></tr>\n";
-
-    auto typeBadge = [](PiiType t) -> std::wstring {
-        switch (t) {
-            case PiiType::RESIDENT_NUMBER: return L"badge-ssn";
-            case PiiType::PHONE_NUMBER:    return L"badge-phone";
-            case PiiType::EMAIL:           return L"badge-email";
-            case PiiType::IP_ADDRESS:      return L"badge-ip";
-            case PiiType::MAC_ADDRESS:     return L"badge-mac";
-            case PiiType::CREDIT_CARD:     return L"badge-card";
-            case PiiType::ADDRESS:         return L"badge-addr";
-            case PiiType::BANK_ACCOUNT:    return L"badge-bank";
-            default:                       return L"badge-other";
-        }
-    };
 
     for (const auto& r : results) {
         for (const auto& m : r.matches) {
