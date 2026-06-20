@@ -36,9 +36,10 @@ public:
     bool isOcrAvailable() const { return m_ocrAvailable; }
 
 private:
-    size_t m_maxTextLength = 1'000'000;
-    bool   m_ocrAvailable  = false;
+    size_t m_maxTextLength  = 1'000'000;
+    bool   m_ocrAvailable   = false;
     bool   m_ocrInitialized = false;
+    bool   m_winrtInited    = false;  // WinRT apartment lazy 초기화 여부
 
     // ---- 추출 메서드 ----
 

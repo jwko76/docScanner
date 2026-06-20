@@ -10,7 +10,7 @@
 //   --threads <N>    : 병렬 스캔 스레드 수 (기본: CPU 코어 수)
 //
 // 의존성:
-//   - Everything 실행 중 필요 + Everything64.dll 동일 폴더
+//   - Everything SDK (선택 사항): 미사용 시 파일시스템 직접 탐색 모드로 동작
 //   - Windows 10+ (Windows OCR API)
 //   - Microsoft Office 설치 시 IFilter 자동 지원
 
@@ -165,6 +165,7 @@ static std::vector<FileScanResult> scanAll(
     std::mutex printMutex;
 
     auto worker = [&]() {
+      try {
         // 각 스레드는 자체 TextExtractor와 PiiDetector 인스턴스 사용
         TextExtractor extractor;
         extractor.setMaxTextLength(2'000'000);  // 최대 2MB 텍스트
@@ -227,12 +228,21 @@ static std::vector<FileScanResult> scanAll(
                 printProgress(doneCount, (int)files.size(), piiFound.load());
             }
         }
+      } catch (const std::exception& ex) {
+          std::lock_guard<std::mutex> lock(printMutex);
+          std::wcerr << L"\n[오류] 스캔 스레드 예외: "
+                     << ex.what() << L"\n";
+      } catch (...) {
+          std::lock_guard<std::mutex> lock(printMutex);
+          std::wcerr << L"\n[오류] 스캔 스레드 알 수 없는 예외\n";
+      }
     };
 
     std::vector<std::thread> threads;
     threads.reserve(nThreads);
     for (int i = 0; i < nThreads; ++i)
         threads.emplace_back(worker);
+
     for (auto& t : threads) t.join();
 
     // 마지막 진행률 출력
@@ -257,15 +267,16 @@ int wmain(int argc, wchar_t* argv[]) {
 
     AppConfig cfg = parseArgs(argc, argv);
 
-    // ---- Step 1: Everything SDK 초기화 ----
+    // ---- Step 1: Everything SDK 초기화 (선택 사항) ----
     std::wcout << L"[1/4] Everything SDK 초기화 중...\n";
     EverythingScanner scanner;
     if (!scanner.initialize(cfg.dllPath)) {
-        std::wcerr << L"[오류] " << scanner.getLastError() << L"\n";
-        std::wcerr << L"  → Everything(https://www.voidtools.com/)을 먼저 실행하세요.\n";
-        return 1;
+        // Everything 없어도 계속 진행 — scanFiles()가 파일시스템 직접 탐색으로 폴백
+        std::wcout << L"  ! Everything 미사용: " << scanner.getLastError() << L"\n";
+        std::wcout << L"  → 파일시스템 직접 탐색 모드로 진행합니다.\n\n";
+    } else {
+        std::wcout << L"  ✓ Everything SDK 연결 성공\n\n";
     }
-    std::wcout << L"  ✓ Everything SDK 연결 성공\n\n";
 
     // ---- Step 2: 파일 목록 조회 ----
     std::wcout << L"[2/4] 파일 목록 조회 중";
@@ -342,7 +353,10 @@ int wmain(int argc, wchar_t* argv[]) {
 
     std::wstring baseName = L"pii_report_" + currentTimestamp();
     Reporter reporter;
-    if (!reporter.saveAll(results, summary, cfg.outputDir, baseName)) {
+
+    bool reportOk = reporter.saveAll(results, summary, cfg.outputDir, baseName);
+
+    if (!reportOk) {
         std::wcerr << L"[경고] " << reporter.getLastError() << L"\n";
     }
 

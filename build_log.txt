@@ -1,0 +1,52 @@
+
+====================================================
+  PiiScanner - C++ 빌드 (?�존???�로 / ?�적 CRT)
+====================================================
+
+  [OK] MSVC 발견: C:\Program Files\Microsoft Visual Studio\18\Insiders\VC\Auxiliary\Build\vcvars64.bat
+
+  컴파??�?..
+
+Microsoft (R) C/C++ Optimizing Compiler Version 19.51.36247 for x64
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+everything_scanner.cpp
+text_extractor.cpp
+pii_detector.cpp
+reporter.cpp
+main.cpp
+src\main.cpp(17): warning C4005: 'NOMINMAX': 매크로 재정의
+src\main.cpp(17): note: 이전에 명령줄에서 선언된 'NOMINMAX'
+src\main.cpp(18): warning C4005: 'WIN32_LEAN_AND_MEAN': 매크로 재정의
+src\main.cpp(18): note: 이전에 명령줄에서 선언된 'WIN32_LEAN_AND_MEAN'
+코드를 생성하고 있습니다...
+Microsoft (R) Incremental Linker Version 14.51.36247.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+/out:build\PiiScanner.exe 
+pathcch.lib 
+shlwapi.lib 
+ole32.lib 
+oleaut32.lib 
+query.lib 
+windowsapp.lib 
+shell32.lib 
+build\everything_scanner.obj 
+build\text_extractor.obj 
+build\pii_detector.obj 
+build\reporter.obj 
+build\main.obj 
+  [OK] Everything64.dll 복사 ?�료
+
+====================================================
+  빌드 ?�공!
+  ?�행 ?�일: build\PiiScanner.exe
+====================================================
+
+  ?�용�?
+    build\PiiScanner.exe                       (?�용???�더 ?�캔)
+    build\PiiScanner.exe --path C:\Users\me    (?�정 경로)
+    build\PiiScanner.exe --skip-images         (OCR ?�략)
+    build\PiiScanner.exe --output C:\Reports   (결과 ?�???�치)
+
+Press any key to continue . . . 

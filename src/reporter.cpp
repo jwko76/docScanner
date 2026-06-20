@@ -39,6 +39,30 @@ std::wstring Reporter::htmlEscape(const std::wstring& s) {
     return out;
 }
 
+// Windows 경로 → file:/// URL 변환 (역슬래시 → 슬래시)
+static std::wstring pathToFileUrl(const std::wstring& path) {
+    std::wstring url = L"file:///";
+    for (wchar_t c : path) {
+        url += (c == L'\\') ? L'/' : c;
+    }
+    return url;
+}
+
+// 맥락 문자열 정리: 출력 불가능한 제어 문자 제거 (한글 안전)
+static std::wstring sanitizeContext(const std::wstring& s) {
+    std::wstring out;
+    out.reserve(s.size());
+    for (wchar_t c : s) {
+        if (c == L'\0') continue;                 // 널 문자 제거
+        if (c < 0x20 && c != L' ') {              // 제어 문자 → 공백
+            out += L' ';
+        } else {
+            out += c;
+        }
+    }
+    return out;
+}
+
 std::wstring Reporter::formatFileSize(LONGLONG bytes) {
     if (bytes < 1024) return std::to_wstring(bytes) + L" B";
     if (bytes < 1024*1024) return std::to_wstring(bytes/1024) + L" KB";
@@ -118,7 +142,10 @@ bool Reporter::saveExcel(const std::vector<FileScanResult>& results,
     int fr = 1;
     for (const auto& r : results) {
         int cntFmt = (r.totalMatches() > 0) ? XLFMT_CELL_RED : XLFMT_NUM;
-        wb.writeString(shFiles, fr, 0, toUtf8(r.filePath),        XLFMT_CELL);
+        // 파일 경로: 클릭 시 열리는 HYPERLINK 수식
+        std::string url  = toUtf8(pathToFileUrl(r.filePath));
+        std::string disp = toUtf8(r.filePath);
+        wb.writeHyperlink(shFiles, fr, 0, url, disp);
         wb.writeString(shFiles, fr, 1, toUtf8(r.extension),       XLFMT_CELL);
         wb.writeNumber(shFiles, fr, 2, r.totalMatches(),           cntFmt);
         wb.writeString(shFiles, fr, 3, toUtf8(r.extractionMethod),XLFMT_CELL);
@@ -151,7 +178,8 @@ bool Reporter::saveExcel(const std::vector<FileScanResult>& results,
     int dr = 1;
     for (const auto& r : results) {
         for (const auto& m : r.matches) {
-            wb.writeString(shDetail, dr, 0, toUtf8(r.filePath),       XLFMT_CELL);
+            wb.writeHyperlink(shDetail, dr, 0,
+                toUtf8(pathToFileUrl(r.filePath)), toUtf8(r.filePath));
             wb.writeString(shDetail, dr, 1, toUtf8(m.typeName),       XLFMT_CELL_RED);
             wb.writeString(shDetail, dr, 2, toUtf8(m.matchedText),    XLFMT_CELL_RED);
             wb.writeString(shDetail, dr, 3, toUtf8(m.maskedText),     XLFMT_CELL);
@@ -293,7 +321,9 @@ std::wstring Reporter::buildHtmlPage(const std::vector<FileScanResult>& results,
     for (const auto& r : results) {
         bool hit = r.totalMatches() > 0;
         html << L"<tr><td class=\"" << (hit ? L"file-hit" : L"file-ok") << L"\">"
-             << htmlEscape(r.filePath) << L"</td>"
+             << L"<a href=\"" << pathToFileUrl(r.filePath)
+             << L"\" title=\"" << htmlEscape(r.filePath) << L"\" style=\"color:inherit;text-decoration:underline dotted\">"
+             << htmlEscape(r.filePath) << L"</a></td>"
              << L"<td>" << htmlEscape(r.extension) << L"</td>"
              << L"<td class=\"" << (hit ? L"count-pos" : L"count-0") << L"\">"
              << r.totalMatches() << L"</td>"
@@ -331,15 +361,23 @@ std::wstring Reporter::buildHtmlPage(const std::vector<FileScanResult>& results,
 
     for (const auto& r : results) {
         for (const auto& m : r.matches) {
+            // 파일명만 추출 (경로 전체는 title에)
+            std::wstring fileName = r.filePath;
+            auto slash = fileName.find_last_of(L"\\/");
+            if (slash != std::wstring::npos) fileName = fileName.substr(slash + 1);
+
             html << L"<tr>"
-                 << L"<td>" << htmlEscape(r.filePath) << L"</td>"
+                 << L"<td><a href=\"" << pathToFileUrl(r.filePath)
+                 << L"\" title=\"" << htmlEscape(r.filePath)
+                 << L"\" style=\"color:#c00000;font-weight:600;text-decoration:underline dotted\">"
+                 << htmlEscape(fileName) << L"</a></td>"
                  << L"<td><span class=\"badge " << typeBadge(m.type) << L"\">"
                  << htmlEscape(m.typeName) << L"</span></td>"
                  << L"<td style=\"color:#c00;font-weight:600\">"
                  << htmlEscape(m.matchedText) << L"</td>"
                  << L"<td class=\"masked\">" << htmlEscape(m.maskedText) << L"</td>"
                  << L"<td style=\"text-align:center\">" << m.lineNumber << L"</td>"
-                 << L"<td class=\"context\">" << htmlEscape(m.contextSnippet) << L"</td>"
+                 << L"<td class=\"context\">" << htmlEscape(sanitizeContext(m.contextSnippet)) << L"</td>"
                  << L"</tr>\n";
         }
     }

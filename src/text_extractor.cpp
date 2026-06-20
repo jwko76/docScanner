@@ -51,12 +51,14 @@ using namespace winrt::Windows::Globalization;
 
 TextExtractor::TextExtractor() {
     // COM 초기화 (멀티스레드 아파트)
+    // WinRT는 OCR이 실제로 필요할 때 lazy 초기화 (ensureOcrInitialized 에서)
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    // WinRT 초기화
-    winrt::init_apartment(winrt::apartment_type::multi_threaded);
 }
 
 TextExtractor::~TextExtractor() {
+    if (m_winrtInited) {
+        winrt::uninit_apartment();
+    }
     CoUninitialize();
 }
 
@@ -387,6 +389,17 @@ bool TextExtractor::ensureOcrInitialized() {
     if (m_ocrInitialized) return m_ocrAvailable;
     m_ocrInitialized = true;
 
+    // WinRT lazy 초기화: OCR이 처음 필요할 때만 apartment 초기화
+    if (!m_winrtInited) {
+        try {
+            winrt::init_apartment(winrt::apartment_type::multi_threaded);
+            m_winrtInited = true;
+        } catch (...) {
+            m_ocrAvailable = false;
+            return false;
+        }
+    }
+
     try {
         // 한국어 OCR 엔진 사용 가능 여부 확인
         auto lang = Language(L"ko-KR");
@@ -498,16 +511,47 @@ TextExtractor::Encoding TextExtractor::detectEncoding(
         bytes[0] == 0xFE && bytes[1] == 0xFF)
         return Encoding::UTF16BE;
 
-    // 간단한 EUC-KR 휴리스틱: 0x80-0xFE 범위 바이트가 있으면 EUC-KR 가능성
-    // 실제로는 더 정교한 감지 필요 (여기서는 단순화)
-    size_t highBytes = 0;
-    for (auto b : bytes) {
-        if (b >= 0x80 && b <= 0xFE) ++highBytes;
+    // UTF-8 vs EUC-KR 판별: UTF-8 멀티바이트 시퀀스 패턴 검증
+    // UTF-8 한글: 0xEA~0xED + 두 개의 0x80~0xBF 연속 바이트
+    // EUC-KR 한글: 0xA1~0xFE + 0xA1~0xFE 두 바이트 쌍
+    size_t validUtf8Seqs = 0;   // 올바른 UTF-8 멀티바이트 시퀀스 수
+    size_t invalidUtf8  = 0;    // UTF-8 패턴에 맞지 않는 고바이트 수
+    size_t highBytes    = 0;
+
+    for (size_t i = 0; i < bytes.size(); ) {
+        uint8_t b = bytes[i];
+        if (b < 0x80) { ++i; continue; }
+
+        ++highBytes;
+
+        // 2바이트 시퀀스: 0xC2~0xDF + 0x80~0xBF
+        if (b >= 0xC2 && b <= 0xDF && i + 1 < bytes.size() &&
+            (bytes[i+1] & 0xC0) == 0x80) {
+            ++validUtf8Seqs; i += 2;
+        }
+        // 3바이트 시퀀스: 0xE0~0xEF + 0x80~0xBF + 0x80~0xBF
+        else if (b >= 0xE0 && b <= 0xEF && i + 2 < bytes.size() &&
+                 (bytes[i+1] & 0xC0) == 0x80 && (bytes[i+2] & 0xC0) == 0x80) {
+            ++validUtf8Seqs; i += 3;
+        }
+        // 4바이트 시퀀스: 0xF0~0xF4 + 세 개의 0x80~0xBF
+        else if (b >= 0xF0 && b <= 0xF4 && i + 3 < bytes.size() &&
+                 (bytes[i+1] & 0xC0) == 0x80 && (bytes[i+2] & 0xC0) == 0x80 &&
+                 (bytes[i+3] & 0xC0) == 0x80) {
+            ++validUtf8Seqs; i += 4;
+        }
+        else {
+            ++invalidUtf8; ++i;
+        }
     }
-    if (highBytes > bytes.size() / 10) {
-        // MultiByteToWideChar로 EUC-KR 시도
-        return Encoding::EUC_KR;
-    }
+
+    if (highBytes == 0) return Encoding::UTF8;  // 순수 ASCII
+
+    // 고바이트가 있고 모두 유효한 UTF-8 시퀀스 → UTF-8
+    if (validUtf8Seqs > 0 && invalidUtf8 == 0) return Encoding::UTF8;
+
+    // 유효하지 않은 UTF-8 바이트가 있으면 EUC-KR(CP949)로 시도
+    if (invalidUtf8 > 0) return Encoding::EUC_KR;
 
     return Encoding::UTF8;
 }

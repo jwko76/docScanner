@@ -213,7 +213,12 @@ std::vector<FileEntry> EverythingScanner::scanFiles(
     const ProgressCallback& progress)
 {
     std::vector<FileEntry> results;
-    if (!m_initialized) return results;
+
+    // Everything을 사용할 수 없으면 파일시스템 직접 탐색으로 폴백
+    if (!m_initialized) {
+        std::wcout << L"[Scanner] Everything 미사용 → 파일시스템 직접 탐색 모드\n";
+        return scanFilesFs(rootPath, progress);
+    }
 
     // 쿼리 설정
     std::wstring query = buildQuery(rootPath);
@@ -238,7 +243,8 @@ std::vector<FileEntry> EverythingScanner::scanFiles(
         DWORD err = m_GetLastError();
         m_lastError = L"Everything 쿼리 실패. 오류 코드: " + std::to_wstring(err);
         std::wcerr << L"[Scanner] " << m_lastError << L"\n";
-        return results;
+        std::wcout << L"[Scanner] → 파일시스템 직접 탐색으로 폴백\n";
+        return scanFilesFs(rootPath, progress);
     }
 
     DWORD total = m_GetNumResults();
@@ -304,4 +310,93 @@ std::wstring EverythingScanner::toLower(const std::wstring& s) {
     std::wstring out = s;
     std::transform(out.begin(), out.end(), out.begin(), ::towlower);
     return out;
+}
+
+// ============================================================
+// 파일시스템 직접 탐색 폴백 (FindFirstFileW 재귀)
+// Everything 없이도 동작하도록 하는 대체 스캔 방법
+// ============================================================
+
+std::vector<FileEntry> EverythingScanner::scanFilesFs(
+    const std::wstring& rootPath,
+    const ProgressCallback& progress)
+{
+    std::vector<FileEntry> results;
+    const auto& docExts = documentExtensions();
+    const auto& imgExts = imageExtensions();
+
+    // 재귀 탐색 람다 (std::function 사용)
+    std::function<void(const std::wstring&)> walk =
+        [&](const std::wstring& dir) {
+
+        WIN32_FIND_DATAW ffd = {};
+        std::wstring pattern = dir + L"\\*";
+        HANDLE hFind = FindFirstFileW(pattern.c_str(), &ffd);
+        if (hFind == INVALID_HANDLE_VALUE) return;
+
+        do {
+            const std::wstring name = ffd.cFileName;
+            // 현재 폴더(.) 와 부모 폴더(..) 건너뜀
+            if (name == L"." || name == L"..") continue;
+
+            std::wstring fullPath = dir + L"\\" + name;
+
+            if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                // [보안] 심볼릭 링크/정션(재파스 포인트) 건너뜀 → 무한 루프 방지
+                if (ffd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
+                walk(fullPath);
+            } else {
+                // 확장자 추출 (소문자)
+                std::wstring ext;
+                size_t dotPos = name.rfind(L'.');
+                if (dotPos != std::wstring::npos) {
+                    ext = name.substr(dotPos);
+                    std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
+                }
+
+                bool isDoc = (docExts.count(ext) > 0);
+                bool isImg = (imgExts.count(ext) > 0);
+                if (!isDoc && !isImg) continue;  // 관심 확장자 외 건너뜀
+
+                LARGE_INTEGER fileSize;
+                fileSize.HighPart = ffd.nFileSizeHigh;
+                fileSize.LowPart  = ffd.nFileSizeLow;
+
+                FileEntry entry;
+                entry.fullPath     = fullPath;
+                entry.extension    = ext;
+                entry.fileSize     = fileSize.QuadPart;
+                entry.dateModified = ffd.ftLastWriteTime;
+                entry.isDocument   = isDoc;
+                entry.isImage      = isImg;
+                results.push_back(std::move(entry));
+
+                // 1000건마다 진행률 콜백 (전체 건수는 미리 알 수 없어 0으로 전달)
+                if (progress && (results.size() % 1000 == 0)) {
+                    progress((DWORD)results.size(), 0);
+                }
+            }
+        } while (FindNextFileW(hFind, &ffd));
+
+        FindClose(hFind);
+    };
+
+    if (rootPath.empty()) {
+        // 경로 미지정 → 전체 드라이브 탐색
+        DWORD drives = GetLogicalDrives();
+        for (int i = 0; i < 26; ++i) {
+            if (!(drives & (1u << i))) continue;
+            wchar_t driveRoot[4] = {
+                (wchar_t)(L'A' + i), L':', L'\\', L'\0'
+            };
+            std::wcout << L"  [FS] 드라이브 탐색: " << driveRoot << L"\n";
+            walk(driveRoot);
+        }
+    } else {
+        walk(rootPath);
+    }
+
+    if (progress) progress((DWORD)results.size(), (DWORD)results.size());
+
+    return results;
 }

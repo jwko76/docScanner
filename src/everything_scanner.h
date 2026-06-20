@@ -82,4 +82,11 @@ private:
     bool loadFunctions();
     std::wstring buildQuery(const std::wstring& rootPath);
     std::wstring toLower(const std::wstring& s);
+
+    // Everything 없이 FindFirstFileW 로 직접 디렉터리를 재귀 탐색하는 폴백
+    // rootPath가 비어 있으면 전체 드라이브를 탐색
+    std::vector<FileEntry> scanFilesFs(
+        const std::wstring& rootPath,
+        const ProgressCallback& progress
+    );
 };

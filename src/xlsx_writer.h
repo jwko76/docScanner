@@ -29,6 +29,7 @@
 #define XLFMT_CELL_RED 3
 #define XLFMT_NUM      4
 #define XLFMT_TITLE    5
+#define XLFMT_LINK     6   // 파란색 밑줄 하이퍼링크
 
 // ============================================================
 // XlsxWriter
@@ -80,6 +81,24 @@ public:
         sh.fr = r1; sh.fc = c1; sh.lr = r2; sh.lc = c2;
     }
 
+    // HYPERLINK 수식 셀 작성: 클릭 시 url 열림, 표시는 display 텍스트
+    void writeHyperlink(int si, int row, int col,
+                        const std::string& url,
+                        const std::string& display,
+                        int fmt = XLFMT_LINK) {
+        if (si < 0 || si >= (int)m_sheets.size()) return;
+        Sheet& sh = m_sheets[si];
+        // 수식: HYPERLINK("url","display")
+        Cell c;
+        c.isFormula  = true;
+        c.fmt        = fmt;
+        c.formulaStr = "HYPERLINK(&quot;" + xe(url) + "&quot;,&quot;" + xe(display) + "&quot;)";
+        c.displayStr = display;
+        sh.cells[{row, col}] = c;
+        if (row > sh.maxRow) sh.maxRow = row;
+        if (col > sh.maxCol) sh.maxCol = col;
+    }
+
     // Write xlsx file to disk; returns true on success
     bool save(const std::string& filepath) {
         using Entry = std::pair<std::string, std::string>;
@@ -104,10 +123,13 @@ private:
     // Data structures
     // ----------------------------------------------------------
     struct Cell {
-        bool   isStr  = false;
-        int    strIdx = 0;
-        double num    = 0.0;
-        int    fmt    = 0;
+        bool   isStr     = false;
+        bool   isFormula = false;    // HYPERLINK 등 수식 셀
+        int    strIdx    = 0;
+        double num       = 0.0;
+        int    fmt       = 0;
+        std::string formulaStr;      // 수식 내용 (XML 이스케이프 전)
+        std::string displayStr;      // 수식 표시 값
     };
 
     struct Sheet {
@@ -259,15 +281,15 @@ private:
         return o;
     }
 
-    // Styles: 4 fonts / 3 fills / 2 borders / 6 cell formats
+    // Styles: 5 fonts / 3 fills / 2 borders / 7 cell formats
     static std::string genStyles() {
         return
             "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
             "<styleSheet xmlns=\"http://schemas.openxmlformats.org"
             "/spreadsheetml/2006/main\">"
 
-            // ---- fonts (idx 0-3) ----
-            "<fonts count=\"4\">"
+            // ---- fonts (idx 0-4) ----
+            "<fonts count=\"5\">"
             // 0: default 11pt
             "<font><sz val=\"11\"/><name val=\"\xEB\xA7\x91\xEC\x9D\x80 \xEA\xB3\xA0\xEB\x94\xB1\"/></font>"
             // 1: bold + white  (HEADER)
@@ -278,6 +300,9 @@ private:
             "<name val=\"\xEB\xA7\x91\xEC\x9D\x80 \xEA\xB3\xA0\xEB\x94\xB1\"/></font>"
             // 3: bold 14pt  (TITLE)
             "<font><b/><sz val=\"14\"/>"
+            "<name val=\"\xEB\xA7\x91\xEC\x9D\x80 \xEA\xB3\xA0\xEB\x94\xB1\"/></font>"
+            // 4: blue underline (LINK / hyperlink)
+            "<font><u/><sz val=\"11\"/><color rgb=\"FF0563C1\"/>"
             "<name val=\"\xEB\xA7\x91\xEC\x9D\x80 \xEA\xB3\xA0\xEB\x94\xB1\"/></font>"
             "</fonts>"
 
@@ -310,8 +335,8 @@ private:
             "<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/>"
             "</cellStyleXfs>"
 
-            // ---- cell formats (idx 0-5 = XLFMT_*) ----
-            "<cellXfs count=\"6\">"
+            // ---- cell formats (idx 0-6 = XLFMT_*) ----
+            "<cellXfs count=\"7\">"
             // 0: DEFAULT
             "<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/>"
             // 1: HEADER – blue bg, white bold, centered, wrapped, border
@@ -332,6 +357,9 @@ private:
             // 5: TITLE – bold 14pt, no border
             "<xf numFmtId=\"0\" fontId=\"3\" fillId=\"0\" borderId=\"0\" xfId=\"0\""
             " applyFont=\"1\"/>"
+            // 6: LINK – blue underline (hyperlink style)
+            "<xf numFmtId=\"0\" fontId=\"4\" fillId=\"0\" borderId=\"1\" xfId=\"0\""
+            " applyFont=\"1\" applyBorder=\"1\"/>"
             "</cellXfs>"
 
             "<cellStyles count=\"1\">"
@@ -393,7 +421,13 @@ private:
                 const Cell& cell  = *colEntry.second;
                 std::string ref   = cellRef(row, col);
 
-                if (cell.isStr) {
+                if (cell.isFormula) {
+                    // 수식 셀 (HYPERLINK 등): t="str" + <f>...</f><v>display</v>
+                    o += "<c r=\"" + ref + "\" t=\"str\"";
+                    if (cell.fmt) o += " s=\"" + std::to_string(cell.fmt) + "\"";
+                    o += "><f>" + cell.formulaStr + "</f>"
+                         "<v>" + xe(cell.displayStr) + "</v></c>";
+                } else if (cell.isStr) {
                     o += "<c r=\"" + ref + "\" t=\"s\"";
                     if (cell.fmt) o += " s=\"" + std::to_string(cell.fmt) + "\"";
                     o += "><v>" + std::to_string(cell.strIdx) + "</v></c>";
