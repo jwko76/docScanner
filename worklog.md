@@ -2,6 +2,57 @@
 
 ---
 
+## 2026-06-20 (세션 8 — 더블클릭 소스파일+탐색기 열기 + exe 코드서명)
+
+### 작업 1: 더블클릭 동작 수정 (`src/main_ui.cpp`)
+
+**문제**: 더블클릭 시 결과 파일(리포트)이 열렸음
+
+**수정**: `NM_DBLCLK` 핸들러에서 `g_gridPaths[sel]` (소스 파일 경로) 기준으로:
+1. `ShellExecuteW(hwnd, L"open", path)` — 소스 파일 직접 열기
+2. `ShellExecuteW(hwnd, L"open", L"explorer.exe", L"/select,\"path\"")` — 파일 선택된 상태로 탐색기 폴더 열기
+
+**테스트**: D:\piiscan_test 스캔 후 그리드 항목 더블클릭 → Excel 파일 열림 + 탐색기에 파일 선택됨 ✓
+
+---
+
+### 작업 2: PiiScannerUI.exe 코드서명 (Smart App Control 통과)
+
+**문제**: 새 빌드 exe가 Windows Smart App Control / WDAC에 의해 차단됨
+
+**원인**: 서명 없는 exe + 클라우드 평판 없음 → "애플리케이션 제어 정책에서 이 파일을 차단했습니다"
+
+**해결 절차**:
+1. `sign_exe.ps1` — `New-SelfSignedCertificate` 로 코드서명 인증서 생성
+   - Subject: `CN=docScanner PiiScanner, O=jwko76, C=KR`
+   - Thumbprint: `4A9A5F218B2B4D90A78274B9C261FED3A9DC78E9`, 유효기간: 2036년
+2. `signtool sign /sha1 /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com`
+3. `add_root_cert.ps1` — `certutil -addstore -user Root piiscanner_sign.cer`
+   - `CurrentUser\Root` 등록 (관리자 권한 불필요, 다이얼로그 없음)
+4. `Get-AuthenticodeSignature` → Status: **Valid** 확인
+
+**결과**: 서명된 PiiScannerUI.exe (634KB) — Smart App Control 차단 없이 정상 실행 ✓
+
+**등록된 인증서 저장소**:
+```
+[✓] CurrentUser\My
+[✓] CurrentUser\Root        ← certutil -addstore -user Root (핵심)
+[✓] CurrentUser\TrustedPublisher
+[ ] LocalMachine\Root       (관리자 권한 필요)
+[ ] LocalMachine\TrustedPublisher (관리자 권한 필요)
+```
+
+---
+
+### 커밋: `ce27ff0`
+```
+feat: 더블클릭 시 소스파일+탐색기 열기 + exe 코드서명
+- src/main_ui.cpp: NM_DBLCLK → ShellExecuteW 2회 (파일+탐색기)
+- sign_exe.ps1, add_root_cert.ps1, check_sig.ps1, check_stores.ps1 추가
+```
+
+---
+
 ## 2026-06-20 (세션 7 — GUI 실시간 결과 그리드 + README 전면 업데이트)
 
 ### 요청 사항
