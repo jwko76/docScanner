@@ -53,6 +53,12 @@
 #define IDC_OPEN_HTML_BTN       112
 #define IDC_OPEN_EXCEL_BTN      113
 #define IDC_MAXSIZE_EDIT        114
+#define IDC_TAB                 115
+#define IDC_GRID                116
+
+// 우클릭 컨텍스트 메뉴 ID
+#define IDM_OPEN_FILE   201
+#define IDM_OPEN_FOLDER 202
 
 // ============================================================
 // 사용자 정의 윈도우 메시지
@@ -61,6 +67,20 @@
 #define WM_SCAN_PROGRESS  (WM_APP + 2)   // wParam = done, lParam = total
 #define WM_SCAN_COMPLETE  (WM_APP + 3)   // wParam = piiFound, lParam = filesWithPii
 #define WM_SCAN_FILES     (WM_APP + 4)   // wParam = totalFiles
+#define WM_SCAN_RESULT    (WM_APP + 5)   // wParam = heap ScanResultItem* (수신 측에서 delete)
+
+// ============================================================
+// 스캔 결과 아이템 (스레드 → UI 전달용)
+// ============================================================
+struct ScanResultItem {
+    std::wstring filePath;    // 전체 경로
+    std::wstring fileName;    // 파일명만
+    std::wstring typeName;    // PII 유형
+    std::wstring matchedText; // 탐지 원문
+    std::wstring maskedText;  // 마스킹 값
+    int          lineNumber = 0;
+    std::wstring context;     // 맥락 (앞뒤 텍스트)
+};
 
 // ============================================================
 // 전역 스캔 상태
@@ -72,6 +92,8 @@ static std::atomic<int>  g_total{0};
 static std::atomic<int>  g_piiFound{0};
 static std::wstring      g_htmlPath;
 static std::wstring      g_xlsxPath;
+// 그리드 행별 전체 경로 (UI 스레드에서만 접근)
+static std::vector<std::wstring> g_gridPaths;
 
 // ============================================================
 // 유틸
@@ -227,6 +249,28 @@ static void ScanThread(HWND hwnd, ScanConfig cfg) {
                 if (extracted.success && !extracted.text.empty()) {
                     res.matches = detector.detect(extracted.text);
                     g_piiFound.fetch_add((int)res.matches.size());
+
+                    // 각 탐지 결과를 UI 그리드로 실시간 전송
+                    for (const auto& m : res.matches) {
+                        auto* ri = new ScanResultItem;
+                        ri->filePath    = entry.fullPath;
+                        auto sl = entry.fullPath.find_last_of(L"\\/");
+                        ri->fileName    = (sl != std::wstring::npos)
+                                          ? entry.fullPath.substr(sl + 1) : entry.fullPath;
+                        ri->typeName    = m.typeName;
+                        ri->matchedText = m.matchedText;
+                        ri->maskedText  = m.maskedText;
+                        ri->lineNumber  = m.lineNumber;
+                        // 맥락: 제어문자 제거 + 최대 120자
+                        std::wstring ctx;
+                        for (wchar_t c : m.contextSnippet) {
+                            if (c == L'\0') continue;
+                            ctx += (c < 0x20) ? L' ' : c;
+                        }
+                        if (ctx.size() > 120) ctx = ctx.substr(0, 120) + L"…";
+                        ri->context = std::move(ctx);
+                        PostMessageW(hwnd, WM_SCAN_RESULT, (WPARAM)ri, 0);
+                    }
                 }
             }
 
@@ -295,8 +339,11 @@ static void ScanThread(HWND hwnd, ScanConfig cfg) {
 // ============================================================
 // 레이아웃 상수
 // ============================================================
-static const int W  = 700;   // 클라이언트 폭 (approximate)
+static const int W  = 960;   // 클라이언트 폭
 static const int M  = 12;    // 마진
+
+// 그리드 컬럼 인덱스
+enum GridCol { GC_FILE=0, GC_TYPE, GC_VALUE, GC_MASKED, GC_LINE, GC_CONTEXT, GC_COUNT };
 
 // ============================================================
 // 윈도우 프로시저
@@ -310,13 +357,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     static HWND hProgress;
     static HWND hStatus;
     static HWND hLogEdit;
+    static HWND hTab, hGrid;
     static HWND hHtmlBtn,  hExcelBtn;
 
     switch (msg) {
 
     // ── 창 생성 ───────────────────────────────────────────────
     case WM_CREATE: {
-        INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_PROGRESS_CLASS };
+        INITCOMMONCONTROLSEX icc = { sizeof(icc),
+            ICC_PROGRESS_CLASS | ICC_TAB_CLASSES | ICC_LISTVIEW_CLASSES };
         InitCommonControlsEx(&icc);
 
         HFONT hF = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
@@ -396,14 +445,55 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         SendMessageW(hStatus, WM_SETFONT, (WPARAM)hF, TRUE);
         y += 28;
 
-        // 행7: 로그창
+        // 행7: 탭컨트롤 (로그 / 스캔 결과)
+        int tabH = 420;
+        hTab = CreateWindowW(WC_TABCONTROLW, L"",
+            WS_CHILD|WS_VISIBLE|TCS_FIXEDWIDTH,
+            M, y, W-24, tabH, hwnd, (HMENU)IDC_TAB, nullptr, nullptr);
+        SendMessageW(hTab, WM_SETFONT, (WPARAM)hF, TRUE);
+        {
+            TCITEMW ti = {}; ti.mask = TCIF_TEXT;
+            ti.pszText = const_cast<LPWSTR>(L"로그");
+            TabCtrl_InsertItem(hTab, 0, &ti);
+            ti.pszText = const_cast<LPWSTR>(L"스캔 결과");
+            TabCtrl_InsertItem(hTab, 1, &ti);
+        }
+
+        // 탭 내용 영역 계산
+        RECT tabRC = { 0, 0, W-24, tabH };
+        TabCtrl_AdjustRect(hTab, FALSE, &tabRC);
+        int cx = M + tabRC.left, cy = y + tabRC.top;
+        int cw = tabRC.right - tabRC.left, ch = tabRC.bottom - tabRC.top;
+
+        // 탭0: 로그 EditBox
         hLogEdit = CreateWindowW(L"EDIT", L"",
-            WS_CHILD|WS_VISIBLE|WS_BORDER|WS_VSCROLL|
+            WS_CHILD|WS_VISIBLE|WS_VSCROLL|
             ES_MULTILINE|ES_READONLY|ES_AUTOVSCROLL,
-            M, y, W-24, 210, hwnd, (HMENU)IDC_LOG_EDIT, nullptr, nullptr);
+            cx, cy, cw, ch, hwnd, (HMENU)IDC_LOG_EDIT, nullptr, nullptr);
         SendMessageW(hLogEdit, WM_SETFONT, (WPARAM)hF, TRUE);
-        SendMessageW(hLogEdit, EM_LIMITTEXT, 0x100000, 0);
-        y += 218;
+        SendMessageW(hLogEdit, EM_LIMITTEXT, 0x200000, 0);
+
+        // 탭1: ListView 결과 그리드 (초기 숨김)
+        hGrid = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
+            WS_CHILD|LVS_REPORT|LVS_SHOWSELALWAYS,
+            cx, cy, cw, ch, hwnd, (HMENU)IDC_GRID, nullptr, nullptr);
+        ListView_SetExtendedListViewStyle(hGrid,
+            LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
+
+        // 그리드 컬럼 추가
+        LVCOLUMNW lvc = {}; lvc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+        auto addCol = [&](int sub, LPWSTR hdr, int w) {
+            lvc.iSubItem = sub; lvc.pszText = hdr; lvc.cx = w;
+            ListView_InsertColumn(hGrid, sub, &lvc);
+        };
+        addCol(GC_FILE,    const_cast<LPWSTR>(L"파일명"),   170);
+        addCol(GC_TYPE,    const_cast<LPWSTR>(L"탐지 유형"), 90);
+        addCol(GC_VALUE,   const_cast<LPWSTR>(L"탐지 값"),  130);
+        addCol(GC_MASKED,  const_cast<LPWSTR>(L"마스킹"),   120);
+        addCol(GC_LINE,    const_cast<LPWSTR>(L"줄"),        40);
+        addCol(GC_CONTEXT, const_cast<LPWSTR>(L"맥락"),     cw-560);
+
+        y += tabH + 8;
 
         // 행8: 리포트 열기 버튼
         hHtmlBtn  = mkBtn(IDC_OPEN_HTML_BTN,  L"HTML 리포트 열기",  M,       y, 160, 28);
@@ -448,6 +538,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_running.store(true);
             g_done.store(0); g_total.store(0); g_piiFound.store(0);
             g_htmlPath.clear(); g_xlsxPath.clear();
+
+            // 그리드 초기화
+            ListView_DeleteAllItems(hGrid);
+            g_gridPaths.clear();
+            TabCtrl_SetCurSel(hTab, 0);  // 로그 탭으로 이동
+            ShowWindow(hLogEdit, SW_SHOW);
+            ShowWindow(hGrid,    SW_HIDE);
 
             SetWindowTextW(hLogEdit, L"");
             SendMessageW(hProgress, PBM_SETPOS, 0, 0);
@@ -510,6 +607,93 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         EnableWindow(hStopBtn,   FALSE);
         if (!g_htmlPath.empty())  EnableWindow(hHtmlBtn,  TRUE);
         if (!g_xlsxPath.empty())  EnableWindow(hExcelBtn, TRUE);
+        // 탐지 결과가 있으면 스캔 결과 탭으로 자동 전환
+        if (pii > 0) {
+            TabCtrl_SetCurSel(hTab, 1);
+            ShowWindow(hLogEdit, SW_HIDE);
+            ShowWindow(hGrid,    SW_SHOW);
+        }
+        return 0;
+    }
+
+    // ── 스캔 결과 → 그리드 행 삽입 ──────────────────────────
+    case WM_SCAN_RESULT: {
+        auto* ri = reinterpret_cast<ScanResultItem*>(wParam);
+        if (!ri) return 0;
+
+        int row = ListView_GetItemCount(hGrid);
+        g_gridPaths.push_back(ri->filePath);
+
+        // 행 삽입
+        LVITEMW lvi = {};
+        lvi.mask    = LVIF_TEXT;
+        lvi.iItem   = row;
+        lvi.iSubItem = GC_FILE;
+        lvi.pszText = const_cast<LPWSTR>(ri->fileName.c_str());
+        ListView_InsertItem(hGrid, &lvi);
+
+        // 서브아이템 채우기
+        auto setSub = [&](int col, const std::wstring& txt) {
+            ListView_SetItemText(hGrid, row, col, const_cast<LPWSTR>(txt.c_str()));
+        };
+        setSub(GC_TYPE,    ri->typeName);
+        setSub(GC_VALUE,   ri->matchedText);
+        setSub(GC_MASKED,  ri->maskedText);
+        setSub(GC_LINE,    std::to_wstring(ri->lineNumber));
+        setSub(GC_CONTEXT, ri->context);
+
+        // 맨 아래로 스크롤
+        ListView_EnsureVisible(hGrid, row, FALSE);
+
+        delete ri;
+        return 0;
+    }
+
+    // ── 탭 전환 / 그리드 더블클릭 알림 ──────────────────────
+    case WM_NOTIFY: {
+        auto* hdr = reinterpret_cast<NMHDR*>(lParam);
+
+        // 탭 선택 변경
+        if (hdr->hwndFrom == hTab && hdr->code == TCN_SELCHANGE) {
+            int sel = TabCtrl_GetCurSel(hTab);
+            ShowWindow(hLogEdit, sel == 0 ? SW_SHOW : SW_HIDE);
+            ShowWindow(hGrid,    sel == 1 ? SW_SHOW : SW_HIDE);
+        }
+
+        // ListView 더블클릭 → 파일 열기
+        if (hdr->hwndFrom == hGrid && hdr->code == NM_DBLCLK) {
+            int sel = ListView_GetNextItem(hGrid, -1, LVNI_SELECTED);
+            if (sel >= 0 && sel < (int)g_gridPaths.size()) {
+                ShellExecuteW(hwnd, L"open",
+                    g_gridPaths[sel].c_str(), nullptr, nullptr, SW_SHOW);
+            }
+        }
+        return 0;
+    }
+
+    // ── 그리드 우클릭 컨텍스트 메뉴 ─────────────────────────
+    case WM_CONTEXTMENU: {
+        if ((HWND)wParam != hGrid) break;
+        int sel = ListView_GetNextItem(hGrid, -1, LVNI_SELECTED);
+        if (sel < 0 || sel >= (int)g_gridPaths.size()) return 0;
+
+        HMENU hMenu = CreatePopupMenu();
+        AppendMenuW(hMenu, MF_STRING, IDM_OPEN_FILE,   L"파일 열기(&O)");
+        AppendMenuW(hMenu, MF_STRING, IDM_OPEN_FOLDER, L"폴더 열기(&F)");
+
+        int cmd = (int)TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+            LOWORD(lParam), HIWORD(lParam), 0, hwnd, nullptr);
+        DestroyMenu(hMenu);
+
+        const std::wstring& path = g_gridPaths[sel];
+        if (cmd == IDM_OPEN_FILE) {
+            ShellExecuteW(hwnd, L"open", path.c_str(), nullptr, nullptr, SW_SHOW);
+        } else if (cmd == IDM_OPEN_FOLDER) {
+            // 탐색기에서 파일 선택 표시
+            std::wstring arg = L"/select,\"" + path + L"\"";
+            ShellExecuteW(hwnd, L"open", L"explorer.exe",
+                arg.c_str(), nullptr, SW_SHOW);
+        }
         return 0;
     }
 
@@ -540,8 +724,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     wc.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
     RegisterClassExW(&wc);
 
-    // 실제 클라이언트 크기 계산
-    RECT rc = {0, 0, 700, 472};
+    // 실제 클라이언트 크기 계산 (960 × 660)
+    RECT rc = {0, 0, 960, 660};
     AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX, FALSE);
 
     g_hwnd = CreateWindowExW(
