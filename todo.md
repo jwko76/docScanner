@@ -65,9 +65,9 @@
   - Everything이 네트워크 경로를 인덱싱하는지 확인
   - 미인덱싱 경로는 `os.walk` fallback 스캐너로 처리
 
-- [ ] **GUI 버전**
-  - tkinter 또는 PyQt6로 간단한 UI
-  - 실시간 탐지 현황 테이블 업데이트
+- [x] **GUI 버전** (세션 5)
+  - Win32 GUI (`PiiScannerUI.exe`) — CLI와 동일 엔진, 별도 빌드
+  - 진행률 표시줄, 실시간 로그, 폴더 탐색 버튼, 결과 파일 열기 버튼
 
 - [x] **C++ 빌드 완성** (세션 4)
   - 외부 라이브러리 의존성 제로 (xlsx_writer.h 자체 구현)
@@ -107,13 +107,14 @@
 - [x] Everything SDK DLL 동적 로딩 (C++)
 - [x] 문서 텍스트 추출 (docx/xlsx/pptx/pdf/hwp/rtf)
 - [x] 이미지 OCR (Tesseract Python / WinOCR C++)
-- [x] 한국어 인코딩 자동 감지 (UTF-8/UTF-16/EUC-KR)
+- [x] 한국어 인코딩 자동 감지 (UTF-8/UTF-16/EUC-KR) — UTF-8 시퀀스 검증 방식으로 개선 (세션 5)
 - [x] 주민등록번호 체크섬 검증
 - [x] 신용카드 Luhn 알고리즘 검증
 - [x] IP 주소 유효성 필터
 - [x] 멀티스레드 병렬 스캔
 - [x] Excel 3시트 리포트 (xlsx_writer.h — 의존성 제로 C++ 구현)
-- [x] HTML 대화형 리포트 (탭 + 차트 + 마스킹)
+- [x] HTML 대화형 리포트 (탭 + 차트 + 마스킹 + 파일 클릭 링크)
+- [x] Excel 리포트 파일 경로 HYPERLINK 수식 (클릭 시 파일 열림) (세션 5)
 - [x] CLI 인자 파싱 (`--path`, `--output`, `--skip-images` 등)
 - [x] 포터블 Python 단일 파일 (`pii_scanner.py`)
 - [x] install.bat / run.bat / run_quick.bat

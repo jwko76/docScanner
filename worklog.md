@@ -2,6 +2,81 @@
 
 ---
 
+## 2026-06-20 (세션 6 — 문서 업데이트)
+
+### 요청 사항
+- USAGE.md, worklog.md, todo.md 등 마크다운 문서를 현재 상태에 맞게 업데이트
+
+### 수행 작업
+
+- `USAGE.md`: GUI 버전 섹션 추가, 파일 클릭 링크 설명 추가, 인코딩 감지 설명 보강, vcpkg embedded git 주의사항 추가
+- `worklog.md`: 세션 5·6 추가
+- `todo.md`: GUI 버전 완료 처리, 신규 완료 항목 추가
+
+---
+
+## 2026-06-20 (세션 5 — Win32 GUI + 인코딩 수정 + 파일 링크)
+
+### 요청 사항
+1. CLI 외에 Win32 GUI 실행파일(`PiiScannerUI.exe`) 추가
+2. HTML 상세 결과 탭 맥락(컨텍스트) 한글 인코딩 깨짐 수정
+3. HTML/Excel 결과에서 파일 경로 클릭 시 해당 문서 열리도록 구현
+
+### 수행 작업
+
+**Win32 GUI (`src/main_ui.cpp` 신규 작성)**
+
+- `wWinMain` 진입점, `WS_OVERLAPPEDWINDOW` 고정 크기 창 (700×472)
+- 컨트롤: 스캔 경로/출력 경로 EditBox + 폴더 탐색 버튼, 이미지 건너뜀 체크박스, 스레드 수/최대 파일 크기 입력, 시작/중지 버튼, 진행률 표시줄, 상태 레이블, 로그 EditBox, HTML/Excel 열기 버튼
+- 커스텀 메시지: `WM_SCAN_LOG(WM_APP+1)`, `WM_SCAN_PROGRESS(WM_APP+2)`, `WM_SCAN_COMPLETE(WM_APP+3)`, `WM_SCAN_FILES(WM_APP+4)`
+- 스캔은 `std::thread(...).detach()`로 백그라운드 실행, `PostMessageW`로 UI 업데이트
+- `CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)` 초기화
+- 링크 플래그: `/SUBSYSTEM:WINDOWS user32.lib gdi32.lib comctl32.lib comdlg32.lib`
+
+**GUI 빌드 스크립트**
+
+- `build_ui.bat`: PowerShell 래퍼 (bat 인코딩 문제 우회)
+- `build_ui.ps1`: MSVC 자동 탐색 후 `cl.exe` 호출
+
+**빌드 오류 수정**
+
+| 오류 | 원인 | 수정 |
+|------|------|------|
+| C2082 재정의 | 람다 매개변수 `int h` vs `HWND h` 충돌 | 높이 매개변수를 `ht`, 내부 변수를 `hc`로 이름 변경 |
+| C4005 매크로 재정의 | `/DNOMINMAX` 등 컴파일러 플래그와 소스 내 `#define` 중복 | `#ifndef` 가드 추가 |
+| bat 인코딩 오류 | UTF-8 한글 + `^` 줄 이음 → CMD 오파싱 | bat을 minimal PS 래퍼로, 실제 로직을 .ps1 파일로 분리 |
+| PowerShell `&&` 오류 | PS에서 `&&` 연산자 미지원 | `cmd /c "..."` 단일 호출로 변경 |
+
+**한글 인코딩 수정 (`src/text_extractor.cpp`)**
+
+- 기존: 0x80~0xFE 범위 바이트 비율로 EUC-KR 판별 → UTF-8 한글도 오탐
+- 수정: UTF-8 멀티바이트 시퀀스 패턴 직접 검증
+  - 2바이트: `0xC2~0xDF` + `0x80~0xBF`
+  - 3바이트: `0xE0~0xEF` + 2×`0x80~0xBF`
+  - 4바이트: `0xF0~0xF4` + 3×`0x80~0xBF`
+  - `validUtf8Seqs > 0 && invalidUtf8 == 0` → UTF-8, `invalidUtf8 > 0` → EUC-KR
+
+**파일 클릭 링크 (`src/reporter.cpp`, `src/xlsx_writer.h`)**
+
+- `pathToFileUrl()`: Windows 경로 → `file:///` URL 변환 (역슬래시 → 슬래시)
+- `sanitizeContext()`: 컨텍스트 문자열 내 NUL/제어문자 제거
+- HTML 파일 목록 탭: 경로를 `<a href="file:///...">` 링크로 변환
+- HTML 상세 결과 탭: 파일명을 빨간 하이퍼링크로 표시
+- Excel: `XLFMT_LINK(6)` 신규 포맷 (파란 밑줄, `fontId=4`, `color FF0563C1`)
+- `writeHyperlink()` 메서드 추가 — `HYPERLINK("url","display")` 수식 삽입
+
+**빌드 결과**
+- `build\PiiScanner.exe` (628,736 B) ✓
+- `build\PiiScannerUI.exe` (634,880 B) ✓
+
+**검증**
+- 테스트 스캔 결과(`pii_report_20260620_144243.html`) 확인
+  - BOM: EF BB BF (UTF-8) ✓
+  - 컨텍스트 한글: `홍길동`, `주민등록번호` 등 정상 출력 ✓
+  - 파일 링크: `file:///D:/piiscan_test/...` 형식 생성 ✓
+
+---
+
 ## 2026-06-19 (세션 4 — C++ 빌드 완성)
 
 ### 요청 사항

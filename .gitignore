@@ -49,3 +49,12 @@ PiiScanTmp_*/
 
 # ──── vcpkg ──────────────────────────────────────────────────────
 vcpkg_installed/
+# vcpkg/ 폴더는 embedded git repository (빌드에 불필요)
+# 이미 커밋된 경우: git rm --cached vcpkg
+vcpkg/
+
+# ──── 임시/테스트 스크립트 ────────────────────────────────────────
+do_commit.ps1
+test.txt
+test_log.txt
+build_log.txt
