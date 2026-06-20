@@ -105,8 +105,32 @@ static AppConfig parseArgs(int argc, wchar_t* argv[]) {
         else if (arg == L"--output"      && i+1 < argc) cfg.outputDir   = argv[++i];
         else if (arg == L"--dll"         && i+1 < argc) cfg.dllPath     = argv[++i];
         else if (arg == L"--skip-images")               cfg.skipImages  = true;
-        else if (arg == L"--max-size"    && i+1 < argc) cfg.maxFileSize = std::stoll(argv[++i]) * 1024 * 1024;
-        else if (arg == L"--threads"     && i+1 < argc) cfg.numThreads  = std::stoi(argv[++i]);
+        else if (arg == L"--max-size"    && i+1 < argc) {
+            try {
+                long long mb = std::stoll(argv[++i]);
+                if (mb <= 0 || mb > 10240) { // 1~10240 MB
+                    std::wcerr << L"[오류] --max-size 값은 1~10240(MB) 범위여야 합니다.\n";
+                    exit(1);
+                }
+                cfg.maxFileSize = mb * 1024 * 1024;
+            } catch (const std::exception&) {
+                std::wcerr << L"[오류] --max-size 인자가 숫자가 아닙니다: " << argv[i] << L"\n";
+                exit(1);
+            }
+        }
+        else if (arg == L"--threads"     && i+1 < argc) {
+            try {
+                int n = std::stoi(argv[++i]);
+                if (n <= 0 || n > 256) {
+                    std::wcerr << L"[오류] --threads 값은 1~256 범위여야 합니다.\n";
+                    exit(1);
+                }
+                cfg.numThreads = n;
+            } catch (const std::exception&) {
+                std::wcerr << L"[오류] --threads 인자가 숫자가 아닙니다: " << argv[i] << L"\n";
+                exit(1);
+            }
+        }
         else if (arg == L"--help" || arg == L"-h") {
             std::wcout <<
                 L"사용법: PiiScanner.exe [옵션]\n"

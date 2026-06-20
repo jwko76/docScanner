@@ -88,6 +88,30 @@ bool EverythingScanner::initialize(const std::wstring& dllPath) {
         }
     }
 
+    // [보안] 사용자 공급 DLL 경로 검증:
+    //   1) 파일이 실제 존재하는지 확인
+    //   2) 확장자가 .dll인지 확인 (대소문자 무시)
+    //   → LoadLibraryW 전에 검증하지 않으면 임의 DLL 로드 가능 (DLL 인젝션)
+    {
+        DWORD attr = GetFileAttributesW(path.c_str());
+        if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY)) {
+            m_lastError = L"DLL 파일을 찾을 수 없습니다: " + path;
+            return false;
+        }
+        // 확장자 검사 (.dll만 허용)
+        auto dotPos = path.rfind(L'.');
+        if (dotPos == std::wstring::npos) {
+            m_lastError = L"DLL 경로의 확장자가 없습니다: " + path;
+            return false;
+        }
+        std::wstring ext = path.substr(dotPos);
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
+        if (ext != L".dll") {
+            m_lastError = L"DLL 경로는 .dll 확장자여야 합니다: " + path;
+            return false;
+        }
+    }
+
     m_hDll = LoadLibraryW(path.c_str());
     if (!m_hDll) {
         m_lastError = L"DLL 로드 실패: " + path;
@@ -151,9 +175,14 @@ std::wstring EverythingScanner::buildQuery(const std::wstring& rootPath) {
     // 문서 + 이미지 확장자를 ext: 형태로 조합
     std::wostringstream oss;
 
-    // 경로 필터
+    // [보안] 경로 필터: 큰따옴표를 제거하여 쿼리 인젝션 방지
+    //   Everything 검색 문법에서 "path" 형태로 경로를 감싸는데,
+    //   rootPath에 큰따옴표가 포함되면 쿼리 구조가 깨짐
     if (!rootPath.empty()) {
-        oss << L"\"" << rootPath << L"\" ";
+        std::wstring safePath = rootPath;
+        safePath.erase(std::remove(safePath.begin(), safePath.end(), L'"'), safePath.end());
+        safePath.erase(std::remove(safePath.begin(), safePath.end(), L'|'), safePath.end());
+        oss << L"\"" << safePath << L"\" ";
     }
 
     // 확장자 OR 조건

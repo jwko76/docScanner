@@ -294,12 +294,27 @@ ExtractionResult TextExtractor::extractOoxml(const std::wstring& filePath,
                               std::to_wstring(GetTickCount64());
     CreateDirectoryW(tmpFolder.c_str(), nullptr);
 
+    // [보안] PowerShell 명령에 filePath를 삽입할 때 단따옴표 이스케이프:
+    //   PowerShell -LiteralPath '...' 구문에서 경로 내 '가 있으면 명령 구조가 깨짐.
+    //   단따옴표를 ''(두 개)로 치환하여 인젝션 방지.
+    auto escapePsSingleQuote = [](const std::wstring& s) -> std::wstring {
+        std::wstring out;
+        out.reserve(s.size());
+        for (wchar_t c : s) {
+            if (c == L'\'') out += L"''";
+            else            out += c;
+        }
+        return out;
+    };
+    std::wstring safeFilePath = escapePsSingleQuote(filePath);
+    std::wstring safeTmpFolder = escapePsSingleQuote(tmpFolder);
+
     // PowerShell로 압축 해제 (간단하고 신뢰성 높음)
-    // Expand-Archive -Force -Path "file.docx" -DestinationPath "tmpFolder"
+    // Expand-Archive -Force -LiteralPath "file.docx" -DestinationPath "tmpFolder"
     std::wstring psCmd =
         L"powershell -NoProfile -NonInteractive -Command "
-        L"\"Expand-Archive -Force -LiteralPath '" + filePath + L"' "
-        L"-DestinationPath '" + tmpFolder + L"'\"";
+        L"\"Expand-Archive -Force -LiteralPath '" + safeFilePath + L"' "
+        L"-DestinationPath '" + safeTmpFolder + L"'\"";
 
     STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi = {};
@@ -539,8 +554,20 @@ std::wstring TextExtractor::eucKrToWString(const std::vector<uint8_t>& bytes) {
         static_cast<int>(bytes.size()),
         nullptr, 0);
     if (wlen <= 0) {
-        // fallback UTF-8
-        return toWString(bytes); // recursive once is safe
+        // [보안] 무한 재귀 방지: toWString을 재호출하면 detectEncoding이 다시
+        // EUC_KR을 반환하여 eucKrToWString→toWString 무한 재귀 발생.
+        // CP949 변환 실패 시 UTF-8로 직접 재시도 (재귀 없음).
+        int wlen2 = MultiByteToWideChar(CP_UTF8, 0,
+            reinterpret_cast<const char*>(bytes.data()),
+            static_cast<int>(bytes.size()),
+            nullptr, 0);
+        if (wlen2 <= 0) return {};
+        std::wstring wstr2(wlen2, L'\0');
+        MultiByteToWideChar(CP_UTF8, 0,
+            reinterpret_cast<const char*>(bytes.data()),
+            static_cast<int>(bytes.size()),
+            wstr2.data(), wlen2);
+        return wstr2;
     }
     std::wstring wstr(wlen, L'\0');
     MultiByteToWideChar(949, 0,
