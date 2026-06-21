@@ -360,6 +360,12 @@ enum GridCol { GC_FILE=0, GC_TYPE, GC_VALUE, GC_MASKED, GC_LINE, GC_CONTEXT, GC_
 // ============================================================
 // 그리드 정렬 / 필터 헬퍼
 // ============================================================
+
+// 컬럼 기본 헤더 텍스트 (정렬 삼각형 추가 전 원본)
+static const wchar_t* const k_colHeaders[GC_COUNT] = {
+    L"파일명", L"탐지 유형", L"탐지 값", L"마스킹", L"줄", L"맥락"
+};
+
 static std::wstring GetItemField(const ScanResultItem& item, int col) {
     switch (col) {
     case GC_FILE:    return item.fileName;
@@ -372,19 +378,35 @@ static std::wstring GetItemField(const ScanResultItem& item, int col) {
     }
 }
 
-// 헤더에 정렬 삼각형 표시 (HDF_SORTUP ▲ / HDF_SORTDOWN ▼)
+// 헤더 텍스트에 정렬 삼각형 직접 추가 (▲ 오름차 / ▼ 내림차)
+// HDF_SORTUP/DOWN 은 ComCtl v6 매니페스트 없이는 표시 안 됨 → 텍스트 방식 사용
 static void SetGridSortArrow(int sortCol, int sortDir) {
     if (!g_hGrid) return;
     HWND hHdr = ListView_GetHeader(g_hGrid);
     int n = Header_GetItemCount(hHdr);
-    for (int i = 0; i < n; i++) {
-        HDITEMW hdi = {}; hdi.mask = HDI_FORMAT;
-        Header_GetItem(hHdr, i, &hdi);
-        hdi.fmt &= ~(HDF_SORTUP | HDF_SORTDOWN);
+    for (int i = 0; i < n && i < GC_COUNT; i++) {
+        // 헤더 텍스트: 기본 이름 + 정렬 중인 컬럼에만 삼각형
+        std::wstring txt = k_colHeaders[i];
         if (i == sortCol) {
-            if (sortDir ==  1) hdi.fmt |= HDF_SORTUP;
-            if (sortDir == -1) hdi.fmt |= HDF_SORTDOWN;
+            if (sortDir ==  1) txt += L" ▲";
+            if (sortDir == -1) txt += L" ▼";
         }
+        wchar_t buf[128];
+        wcscpy_s(buf, std::size(buf), txt.c_str());
+
+        HDITEMW hdi = {};
+        hdi.mask     = HDI_TEXT | HDI_FORMAT;
+        hdi.pszText  = buf;
+        hdi.cchTextMax = (int)wcslen(buf);
+        // 기존 format 읽어 정렬 방향 플래그도 함께 반영
+        HDITEMW hdiFmt = {}; hdiFmt.mask = HDI_FORMAT;
+        Header_GetItem(hHdr, i, &hdiFmt);
+        hdiFmt.fmt &= ~(HDF_SORTUP | HDF_SORTDOWN);
+        if (i == sortCol) {
+            if (sortDir ==  1) hdiFmt.fmt |= HDF_SORTUP;
+            if (sortDir == -1) hdiFmt.fmt |= HDF_SORTDOWN;
+        }
+        hdi.fmt = hdiFmt.fmt;
         Header_SetItem(hHdr, i, &hdi);
     }
 }
