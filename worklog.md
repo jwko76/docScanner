@@ -2,6 +2,71 @@
 
 ---
 
+## 2026-06-21 (세션 9 -- 포터블 패키지 + OCR 검증 + 사용자 문서)
+
+### 작업 1: 포터블 패키지 구성 (`dist/` 폴더)
+
+**목적**: 설치 없이 폴더 복사만으로 어디서든 실행 가능한 패키지
+
+**포함 파일**:
+```
+dist/
+  PiiScannerUI.exe      (서명됨, 634KB) -- git 제외 (바이너리)
+  PiiScanner.exe        (CLI, 615KB)    -- git 제외 (바이너리)
+  Everything64.dll      (88KB)          -- git 제외 (재배포 제한)
+  PiiScannerUI_실행.bat  -- GUI 빠른 실행
+  PiiScanner_CLI.bat    -- CLI 빠른 실행 (폴더 경로 인자)
+  README.txt            -- 사용 안내 (한국어)
+  사용자_가이드.html    -- 상세 HTML 가이드
+  output/               -- 스캔 결과 저장 폴더
+```
+
+---
+
+### 작업 2: 이미지/스캔 파일 OCR 검증
+
+**테스트 이미지 생성** (`create_test_images.py`):
+- `test_rrn_phone.png`: 주민등록번호, 전화번호, 주소 포함
+- `test_email_account.jpg`: 이메일, 계좌번호, 신용카드 포함
+- `test_scanned_doc.png`: 여권번호, 운전면허, 이메일 포함 (회색 배경)
+- `test_small_font.png`: 주민번호, 계좌번호, 신용카드 포함 (작은 폰트)
+
+**OCR 검증 결과** (D:\piiscan_test\ocr_test, OCR 모드):
+```
+파일 4개 / 개인정보 파일 4개 / 탐지 11건
+  test_rrn_phone.png  : 전화번호, 계좌번호, 주소
+  test_small_font.png : 계좌번호, 신용카드번호
+  test_scanned_doc.png: 운전면허번호, 전화번호
+  test_email_account.jpg: 이메일, 계좌번호 x2
+```
+- **OCR 탐지 확인**: 전화번호, 이메일, 계좌번호, 신용카드, 운전면허 탐지 성공
+- **주민등록번호**: OCR 하이픈 인식 문제로 미탐지 (향후 개선 필요)
+- **사용법**: "이미지 OCR 건너뜀 (빠른 스캔)" 체크박스 해제 필요
+
+---
+
+### 작업 3: 사용자 문서 작성 (`dist/사용자_가이드.html`)
+
+**내용**:
+- GUI/CLI 단계별 사용법 (스크린샷 텍스트 예시 포함)
+- OCR 옵션 설명 (체크박스 해제 안내)
+- 탐지 항목 8종 표 (패턴/검증 방법 포함)
+- 지원 파일 형식 표 (문서/이미지/한글 등)
+- 출력 결과 설명 + 보안 주의사항
+- FAQ (OCR 미탐지, PDF 미검사, 느린 스캔 등)
+
+---
+
+### 커밋: `682863a`
+```
+feat: 포터블 패키지(dist) + 사용자 가이드 + OCR 검증 스크립트
+- dist/: README.txt, 실행 배치파일, 사용자_가이드.html, output/ 폴더
+- create_test_images.py: OCR 검증용 이미지 생성 (PIL/Pillow)
+- .gitignore: pii_report_*.html/xlsx 패턴으로 세분화
+```
+
+---
+
 ## 2026-06-20 (세션 8 — 더블클릭 소스파일+탐색기 열기 + exe 코드서명)
 
 ### 작업 1: 더블클릭 동작 수정 (`src/main_ui.cpp`)
