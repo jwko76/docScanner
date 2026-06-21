@@ -11,14 +11,18 @@ out/
 
 # ──── 리포트 출력 (스캔 결과 - 개인정보 포함 가능) ───────────────
 reports/
-*.xlsx
-*.html
+output/
+pii_report_*.xlsx
+pii_report_*.html
 
 # ──── Everything SDK DLL (재배포 불가) ──────────────────────────
 sdk/Everything64.dll
 sdk/Everything32.dll
 Everything64.dll
 Everything32.dll
+dist/Everything64.dll
+dist/PiiScanner.exe
+dist/PiiScannerUI.exe
 
 # ──── Python ────────────────────────────────────────────────────
 __pycache__/
@@ -27,7 +31,6 @@ __pycache__/
 *.pyd
 .Python
 *.egg-info/
-dist/
 .eggs/
 .venv/
 venv/
@@ -49,8 +52,6 @@ PiiScanTmp_*/
 
 # ──── vcpkg ──────────────────────────────────────────────────────
 vcpkg_installed/
-# vcpkg/ 폴더는 embedded git repository (빌드에 불필요)
-# 이미 커밋된 경우: git rm --cached vcpkg
 vcpkg/
 
 # ──── 임시/테스트 스크립트 ────────────────────────────────────────

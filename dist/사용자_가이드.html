@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PiiScanner 사용자 가이드</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Malgun Gothic', '맑은 고딕', sans-serif; background: #f5f7fa; color: #333; line-height: 1.7; }
+  .header { background: linear-gradient(135deg, #1a73e8, #0d47a1); color: white; padding: 40px 0; text-align: center; }
+  .header h1 { font-size: 2.2em; margin-bottom: 8px; }
+  .header p { opacity: 0.85; font-size: 1.05em; }
+  .badge { display: inline-block; background: rgba(255,255,255,0.2); border-radius: 20px; padding: 3px 14px; font-size: 0.85em; margin: 4px; }
+  .container { max-width: 900px; margin: 0 auto; padding: 30px 20px; }
+  .card { background: white; border-radius: 10px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); margin-bottom: 24px; overflow: hidden; }
+  .card-header { background: #1a73e8; color: white; padding: 14px 22px; font-size: 1.1em; font-weight: bold; display: flex; align-items: center; gap: 10px; }
+  .card-header .num { background: rgba(255,255,255,0.25); border-radius: 50%; width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; font-size: 0.9em; flex-shrink: 0; }
+  .card-body { padding: 22px; }
+  .step { display: flex; gap: 16px; margin-bottom: 18px; align-items: flex-start; }
+  .step-num { background: #1a73e8; color: white; border-radius: 50%; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; font-weight: bold; flex-shrink: 0; font-size: 0.9em; }
+  .step-content h4 { margin-bottom: 5px; color: #1a73e8; }
+  .step-content p, .step-content ul { font-size: 0.95em; color: #555; }
+  .step-content ul { padding-left: 18px; }
+  .step-content li { margin-bottom: 3px; }
+  .tip { background: #e8f4fd; border-left: 4px solid #1a73e8; padding: 12px 16px; border-radius: 0 6px 6px 0; margin-top: 10px; font-size: 0.92em; }
+  .warn { background: #fff3e0; border-left: 4px solid #f57c00; padding: 12px 16px; border-radius: 0 6px 6px 0; margin-top: 10px; font-size: 0.92em; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.93em; }
+  th { background: #e8eaf6; color: #333; padding: 10px 14px; text-align: left; border-bottom: 2px solid #c5cae9; }
+  td { padding: 9px 14px; border-bottom: 1px solid #eee; vertical-align: top; }
+  tr:hover td { background: #f8f9ff; }
+  .pii-badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 0.82em; font-weight: bold; margin: 2px; }
+  .b-rrn { background: #fce4ec; color: #c62828; }
+  .b-phone { background: #e8f5e9; color: #2e7d32; }
+  .b-email { background: #e3f2fd; color: #1565c0; }
+  .b-account { background: #fff3e0; color: #e65100; }
+  .b-card { background: #f3e5f5; color: #6a1b9a; }
+  .b-addr { background: #e0f2f1; color: #00695c; }
+  .b-passport { background: #fbe9e7; color: #bf360c; }
+  .b-license { background: #f9fbe7; color: #558b2f; }
+  .file-list { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
+  .file-item { background: #f8f9ff; border: 1px solid #e0e3ff; border-radius: 6px; padding: 10px 14px; }
+  .file-item .name { font-weight: bold; color: #1a73e8; font-size: 0.95em; }
+  .file-item .desc { font-size: 0.85em; color: #666; margin-top: 3px; }
+  .screenshot-box { background: #263238; border-radius: 8px; padding: 20px; color: #aed6f1; font-family: monospace; font-size: 0.88em; line-height: 1.6; margin-top: 10px; }
+  .sc-green { color: #a5d6a7; }
+  .sc-yellow { color: #fff176; }
+  .sc-gray { color: #90a4ae; }
+  footer { text-align: center; padding: 30px; color: #999; font-size: 0.88em; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>🔍 PiiScanner</h1>
+  <p>개인정보 / 민감정보 탐지 도구 — 사용자 가이드</p>
+  <div style="margin-top:14px;">
+    <span class="badge">Windows 10/11</span>
+    <span class="badge">설치 불필요</span>
+    <span class="badge">한국어 OCR</span>
+    <span class="badge">이미지/스캔 지원</span>
+  </div>
+</div>
+
+<div class="container">
+
+  <!-- 소개 -->
+  <div class="card">
+    <div class="card-header"><div class="num">★</div> 이 도구는 무엇인가요?</div>
+    <div class="card-body">
+      <p>PiiScanner는 PC에 저장된 문서, 이미지, 스캔 파일에서 <strong>개인정보 및 민감정보를 자동으로 탐지</strong>하는 도구입니다.<br>
+      설치 없이 폴더를 통째로 복사해서 어디서든 바로 실행할 수 있습니다.</p>
+      <div class="tip">💡 <strong>포터블 실행</strong> — 이 폴더 전체를 USB에 복사해서 다른 PC에서도 동일하게 사용 가능합니다.</div>
+    </div>
+  </div>
+
+  <!-- 포함 파일 -->
+  <div class="card">
+    <div class="card-header"><div class="num">📁</div> 포함 파일 목록</div>
+    <div class="card-body">
+      <div class="file-list">
+        <div class="file-item"><div class="name">PiiScannerUI.exe</div><div class="desc">GUI 버전 (권장) — 더블클릭으로 실행</div></div>
+        <div class="file-item"><div class="name">PiiScanner.exe</div><div class="desc">CLI 버전 — 명령줄/배치 파일에서 사용</div></div>
+        <div class="file-item"><div class="name">Everything64.dll</div><div class="desc">고속 파일 검색 엔진 (자동 사용)</div></div>
+        <div class="file-item"><div class="name">PiiScannerUI_실행.bat</div><div class="desc">GUI 빠른 실행 배치파일</div></div>
+        <div class="file-item"><div class="name">PiiScanner_CLI.bat</div><div class="desc">CLI 빠른 실행 배치파일</div></div>
+        <div class="file-item"><div class="name">output/</div><div class="desc">스캔 결과 저장 폴더</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- GUI 사용법 -->
+  <div class="card">
+    <div class="card-header"><div class="num">1</div> GUI 버전 사용법 (권장)</div>
+    <div class="card-body">
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-content">
+          <h4>실행</h4>
+          <p><code>PiiScannerUI_실행.bat</code> 또는 <code>PiiScannerUI.exe</code>를 더블클릭합니다.</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-content">
+          <h4>스캔 경로 설정</h4>
+          <p>"스캔 경로" 옆 <strong>[찾아보기]</strong> 버튼을 눌러 검사할 폴더를 선택합니다.</p>
+          <ul>
+            <li>예: <code>C:\Users\홍길동\Documents</code></li>
+            <li>예: <code>D:\업무자료\계약서</code></li>
+          </ul>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-content">
+          <h4>OCR 옵션 설정 (이미지/스캔 파일 검사 시)</h4>
+          <p><strong>"이미지 OCR 건너뜀 (빠른 스캔)"</strong> 체크박스:</p>
+          <ul>
+            <li>✅ 체크됨 → 이미지 파일 건너뜀 (빠름)</li>
+            <li>☐ 체크 해제 → 이미지/스캔 파일도 OCR로 검사 (느리지만 완전한 검사)</li>
+          </ul>
+          <div class="tip">💡 JPG, PNG, TIFF, BMP, 스캔 PDF 검사 시 반드시 체크 해제하세요.</div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">4</div>
+        <div class="step-content">
+          <h4>스캔 시작</h4>
+          <p><strong>[▶ 스캔 시작]</strong> 버튼을 클릭합니다. 진행 상황이 실시간으로 표시됩니다.</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">5</div>
+        <div class="step-content">
+          <h4>결과 확인</h4>
+          <p>스캔 완료 후 <strong>"스캔 결과"</strong> 탭에서 탐지 목록 확인:</p>
+          <ul>
+            <li>파일명 <strong>더블클릭</strong> → 해당 파일 열기 + 탐색기에서 위치 표시</li>
+            <li><strong>[HTML 리포트 열기]</strong> → 브라우저에서 상세 결과 확인</li>
+            <li><strong>[Excel 리포트 열기]</strong> → Excel에서 필터링/분석</li>
+          </ul>
+        </div>
+      </div>
+      <div class="screenshot-box">
+        <div class="sc-green">완료 — 파일 7개 / 개인정보 파일 4개 / 탐지 11건</div>
+        <div class="sc-gray">──────────────────────────────────────────</div>
+        <div class="sc-yellow">파일명              탐지유형   탐지 값</div>
+        <div>test_rrn_phone.png  전화번호   010-****-5678</div>
+        <div>test_rrn_phone.png  주소       서울특별시 강남구...</div>
+        <div>test_email.jpg      이메일     h***@example.com</div>
+        <div>test_email.jpg      계좌번호   110-123*******</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CLI 사용법 -->
+  <div class="card">
+    <div class="card-header"><div class="num">2</div> CLI 버전 사용법</div>
+    <div class="card-body">
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-content">
+          <h4>배치파일로 실행</h4>
+          <p><code>PiiScanner_CLI.bat</code>에 폴더를 드래그&드롭하거나, 명령줄에서 실행:</p>
+          <div class="screenshot-box">PiiScanner_CLI.bat C:\Users\홍길동\Documents</div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-content">
+          <h4>직접 실행 (고급)</h4>
+          <div class="screenshot-box">
+            <div class="sc-gray"># 기본 스캔</div>
+            <div>PiiScanner.exe --path "C:\Users\user\Documents" --output output\</div>
+            <div style="margin-top:8px;" class="sc-gray"># OCR 포함 스캔 (이미지/스캔 파일)</div>
+            <div>PiiScanner.exe --path "D:\업무자료" --output output\ --ocr</div>
+            <div style="margin-top:8px;" class="sc-gray"># 멀티스레드 (빠른 스캔)</div>
+            <div>PiiScanner.exe --path "C:\Users" --output output\ --threads 8</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 탐지 항목 -->
+  <div class="card">
+    <div class="card-header"><div class="num">3</div> 탐지 항목</div>
+    <div class="card-body">
+      <table>
+        <tr>
+          <th>탐지 유형</th>
+          <th>예시</th>
+          <th>탐지 방법</th>
+        </tr>
+        <tr>
+          <td><span class="pii-badge b-rrn">주민등록번호</span></td>
+          <td>850101-1234566</td>
+          <td>날짜 유효성 + 가중치 체크섬</td>
+        </tr>
+        <tr>
+          <td><span class="pii-badge b-phone">전화번호</span></td>
+          <td>010-1234-5678 / 02-1234-5678</td>
+          <td>패턴 매칭</td>
+        </tr>
+        <tr>
+          <td><span class="pii-badge b-email">이메일</span></td>
+          <td>hong@example.com</td>
+          <td>RFC 5322 패턴</td>
+        </tr>
+        <tr>
+          <td><span class="pii-badge b-account">계좌번호</span></td>
+          <td>110-1234-567890</td>
+          <td>은행별 형식 패턴</td>
+        </tr>
+        <tr>
+          <td><span class="pii-badge b-card">신용카드</span></td>
+          <td>4111-1111-1111-1111</td>
+          <td>Luhn 알고리즘 검증</td>
+        </tr>
+        <tr>
+          <td><span class="pii-badge b-addr">주소</span></td>
+          <td>서울특별시 강남구 테헤란로 123</td>
+          <td>행정구역 키워드 패턴</td>
+        </tr>
+        <tr>
+          <td><span class="pii-badge b-passport">여권번호</span></td>
+          <td>M12345678</td>
+          <td>한국 여권 형식</td>
+        </tr>
+        <tr>
+          <td><span class="pii-badge b-license">운전면허</span></td>
+          <td>12-34-567890-01</td>
+          <td>면허번호 형식</td>
+        </tr>
+      </table>
+    </div>
+  </div>
+
+  <!-- 지원 파일 형식 -->
+  <div class="card">
+    <div class="card-header"><div class="num">4</div> 지원 파일 형식</div>
+    <div class="card-body">
+      <table>
+        <tr><th>분류</th><th>확장자</th><th>추출 방법</th></tr>
+        <tr><td>Word 문서</td><td>.docx, .doc</td><td>IFilter (Office 설치 시) / OOXML 직접 파싱</td></tr>
+        <tr><td>Excel</td><td>.xlsx, .xls</td><td>IFilter / OOXML 직접 파싱</td></tr>
+        <tr><td>PowerPoint</td><td>.pptx, .ppt</td><td>IFilter / OOXML 직접 파싱</td></tr>
+        <tr><td>PDF</td><td>.pdf</td><td>IFilter (Acrobat 설치 시)</td></tr>
+        <tr><td>한글(HWP)</td><td>.hwp, .hwpx</td><td>IFilter (한컴 설치 시)</td></tr>
+        <tr><td>텍스트</td><td>.txt, .csv, .log</td><td>직접 읽기 (UTF-8/EUC-KR 자동 판별)</td></tr>
+        <tr><td><strong>이미지</strong></td><td>.jpg, .jpeg, .png, .tiff, .bmp</td><td><strong>WinRT OCR (한국어)</strong> — OCR 옵션 켜야 함</td></tr>
+      </table>
+      <div class="warn">⚠️ <strong>이미지/스캔 파일 검사 시</strong>: "이미지 OCR 건너뜀" 체크박스를 <strong>해제</strong>해야 합니다. OCR은 처리 시간이 더 걸립니다.</div>
+    </div>
+  </div>
+
+  <!-- 출력 결과 -->
+  <div class="card">
+    <div class="card-header"><div class="num">5</div> 결과 파일</div>
+    <div class="card-body">
+      <table>
+        <tr><th>파일</th><th>설명</th></tr>
+        <tr>
+          <td><code>output\pii_report_YYYYMMDD_HHMMSS.html</code></td>
+          <td>브라우저에서 열기. 파일명 클릭 → 해당 파일 바로 열기. 탐지 유형별 필터 가능.</td>
+        </tr>
+        <tr>
+          <td><code>output\pii_report_YYYYMMDD_HHMMSS.xlsx</code></td>
+          <td>Excel에서 열기. 자동 필터 적용됨. 파일명 하이퍼링크 클릭 → 파일 열기.</td>
+        </tr>
+      </table>
+      <div class="warn" style="margin-top:14px;">🔒 <strong>보안 주의</strong>: 결과 파일에는 탐지된 개인정보가 포함됩니다. 외부 유출 방지를 위해 output 폴더를 안전하게 관리하고, 검토 후 삭제하세요.</div>
+    </div>
+  </div>
+
+  <!-- FAQ -->
+  <div class="card">
+    <div class="card-header"><div class="num">?</div> 자주 묻는 질문 (FAQ)</div>
+    <div class="card-body">
+      <div class="step">
+        <div class="step-num">Q</div>
+        <div class="step-content">
+          <h4>이미지에서 개인정보가 탐지되지 않아요</h4>
+          <p>"이미지 OCR 건너뜀 (빠른 스캔)" 체크박스를 <strong>해제</strong>하고 다시 스캔하세요. 기본값은 빠른 스캔(이미지 제외)입니다.</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">Q</div>
+        <div class="step-content">
+          <h4>PDF가 검사되지 않아요</h4>
+          <p>Adobe Acrobat Reader 또는 Pro가 설치되어 있어야 PDF IFilter가 동작합니다. 설치 후 재시도하세요. 스캔된 PDF(이미지 기반)는 OCR 옵션을 켜도 현재 미지원입니다.</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">Q</div>
+        <div class="step-content">
+          <h4>스캔이 매우 느려요</h4>
+          <p>OCR이 켜진 경우 이미지당 수 초가 소요될 수 있습니다. 스레드 수를 늘리거나(CLI <code>--threads 8</code>), 이미지가 많지 않은 경우에만 OCR을 사용하세요.</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">Q</div>
+        <div class="step-content">
+          <h4>한글 문서가 깨져서 검사되지 않아요</h4>
+          <p>한컴오피스(한글 뷰어 포함)가 설치되어 있어야 HWP IFilter가 동작합니다.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<footer>
+  PiiScanner v1.0 &nbsp;|&nbsp; Windows 10/11 64-bit &nbsp;|&nbsp; WinRT OCR (한국어) &nbsp;|&nbsp; MIT License
+</footer>
+
+</body>
+</html>
