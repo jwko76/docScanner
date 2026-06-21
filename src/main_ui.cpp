@@ -17,6 +17,7 @@
 #endif
 
 #include <windows.h>
+#include <windowsx.h>
 #include <commctrl.h>
 #include <shlobj.h>
 #include <shlwapi.h>
@@ -55,6 +56,7 @@
 #define IDC_MAXSIZE_EDIT        114
 #define IDC_TAB                 115
 #define IDC_GRID                116
+#define IDC_FILTER_COMBO        118   // 탐지 유형 필터 드롭다운
 
 // 우클릭 컨텍스트 메뉴 ID
 #define IDM_OPEN_FILE   201
@@ -94,6 +96,16 @@ static std::wstring      g_htmlPath;
 static std::wstring      g_xlsxPath;
 // 그리드 행별 전체 경로 (UI 스레드에서만 접근)
 static std::vector<std::wstring> g_gridPaths;
+// 전체 스캔 결과 사본 (정렬/필터 재구성용)
+static std::vector<ScanResultItem> g_allItems;
+// 그리드 정렬: sortCol -1=없음, sortDir 0=없음 1=오름차 -1=내림차
+static int          g_sortCol = -1;
+static int          g_sortDir = 0;
+// 탐지 유형 필터 (L""=전체)
+static std::wstring g_filterType;
+// 핵심 컨트롤 핸들 (WndProc 외부 접근용)
+static HWND         g_hGrid        = nullptr;
+static HWND         g_hFilterCombo = nullptr;
 
 // ============================================================
 // 유틸
@@ -346,6 +358,96 @@ static const int M  = 12;    // 마진
 enum GridCol { GC_FILE=0, GC_TYPE, GC_VALUE, GC_MASKED, GC_LINE, GC_CONTEXT, GC_COUNT };
 
 // ============================================================
+// 그리드 정렬 / 필터 헬퍼
+// ============================================================
+static std::wstring GetItemField(const ScanResultItem& item, int col) {
+    switch (col) {
+    case GC_FILE:    return item.fileName;
+    case GC_TYPE:    return item.typeName;
+    case GC_VALUE:   return item.matchedText;
+    case GC_MASKED:  return item.maskedText;
+    case GC_LINE:    return std::to_wstring(item.lineNumber);
+    case GC_CONTEXT: return item.context;
+    default:         return L"";
+    }
+}
+
+// 헤더에 정렬 삼각형 표시 (HDF_SORTUP ▲ / HDF_SORTDOWN ▼)
+static void SetGridSortArrow(int sortCol, int sortDir) {
+    if (!g_hGrid) return;
+    HWND hHdr = ListView_GetHeader(g_hGrid);
+    int n = Header_GetItemCount(hHdr);
+    for (int i = 0; i < n; i++) {
+        HDITEMW hdi = {}; hdi.mask = HDI_FORMAT;
+        Header_GetItem(hHdr, i, &hdi);
+        hdi.fmt &= ~(HDF_SORTUP | HDF_SORTDOWN);
+        if (i == sortCol) {
+            if (sortDir ==  1) hdi.fmt |= HDF_SORTUP;
+            if (sortDir == -1) hdi.fmt |= HDF_SORTDOWN;
+        }
+        Header_SetItem(hHdr, i, &hdi);
+    }
+}
+
+// 현재 필터 + 정렬 상태로 그리드 전체 재구성
+static void RebuildGrid() {
+    if (!g_hGrid) return;
+
+    // 1. 필터 적용
+    std::vector<size_t> idxs;
+    idxs.reserve(g_allItems.size());
+    for (size_t i = 0; i < g_allItems.size(); i++) {
+        if (g_filterType.empty() || g_allItems[i].typeName == g_filterType)
+            idxs.push_back(i);
+    }
+
+    // 2. 정렬
+    if (g_sortCol >= 0 && g_sortDir != 0) {
+        bool numCol = (g_sortCol == GC_LINE);
+        std::stable_sort(idxs.begin(), idxs.end(), [&](size_t a, size_t b) {
+            std::wstring va = GetItemField(g_allItems[a], g_sortCol);
+            std::wstring vb = GetItemField(g_allItems[b], g_sortCol);
+            int cmp;
+            if (numCol) {
+                int ia = _wtoi(va.c_str()), ib = _wtoi(vb.c_str());
+                cmp = (ia < ib) ? -1 : (ia > ib) ? 1 : 0;
+            } else {
+                cmp = _wcsicmp(va.c_str(), vb.c_str());
+            }
+            return g_sortDir == 1 ? cmp < 0 : cmp > 0;
+        });
+    }
+
+    // 3. ListView 재구성 (WM_SETREDRAW로 깜박임 방지)
+    SendMessageW(g_hGrid, WM_SETREDRAW, FALSE, 0);
+    ListView_DeleteAllItems(g_hGrid);
+    g_gridPaths.clear();
+
+    for (size_t idx : idxs) {
+        const ScanResultItem& ri = g_allItems[idx];
+        int row = ListView_GetItemCount(g_hGrid);
+        g_gridPaths.push_back(ri.filePath);
+
+        LVITEMW lvi = {};
+        lvi.mask     = LVIF_TEXT;
+        lvi.iItem    = row;
+        lvi.iSubItem = GC_FILE;
+        lvi.pszText  = const_cast<LPWSTR>(ri.fileName.c_str());
+        ListView_InsertItem(g_hGrid, &lvi);
+
+        std::wstring lineStr = std::to_wstring(ri.lineNumber);
+        ListView_SetItemText(g_hGrid, row, GC_TYPE,    const_cast<LPWSTR>(ri.typeName.c_str()));
+        ListView_SetItemText(g_hGrid, row, GC_VALUE,   const_cast<LPWSTR>(ri.matchedText.c_str()));
+        ListView_SetItemText(g_hGrid, row, GC_MASKED,  const_cast<LPWSTR>(ri.maskedText.c_str()));
+        ListView_SetItemText(g_hGrid, row, GC_LINE,    const_cast<LPWSTR>(lineStr.c_str()));
+        ListView_SetItemText(g_hGrid, row, GC_CONTEXT, const_cast<LPWSTR>(ri.context.c_str()));
+    }
+
+    SendMessageW(g_hGrid, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(g_hGrid, nullptr, TRUE);
+}
+
+// ============================================================
 // 윈도우 프로시저
 // ============================================================
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -359,6 +461,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     static HWND hLogEdit;
     static HWND hTab, hGrid;
     static HWND hHtmlBtn,  hExcelBtn;
+    static HWND hFilterCombo;
 
     switch (msg) {
 
@@ -424,6 +527,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         mkLabel(L"최대 크기(MB):", 425, y+3, 95, 20);
         hMaxSizeEdit = mkEdit(IDC_MAXSIZE_EDIT, 524, y, 55, 24, ES_NUMBER);
         SetWindowTextW(hMaxSizeEdit, L"100");
+
+        // 탐지 유형 필터 (행3 우측)
+        mkLabel(L"탐지 유형:", 590, y+3, 74, 20);
+        hFilterCombo = CreateWindowW(L"COMBOBOX", L"",
+            WS_CHILD|WS_VISIBLE|CBS_DROPDOWNLIST|WS_VSCROLL,
+            666, y, 210, 220, hwnd, (HMENU)IDC_FILTER_COMBO, nullptr, nullptr);
+        SendMessageW(hFilterCombo, WM_SETFONT, (WPARAM)hF, TRUE);
+        ComboBox_AddString(hFilterCombo, L"전체 (필터 없음)");
+        ComboBox_SetCurSel(hFilterCombo, 0);
+        g_hFilterCombo = hFilterCombo;
         y += 32;
 
         // 행4: 버튼
@@ -479,6 +592,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             cx, cy, cw, ch, hwnd, (HMENU)IDC_GRID, nullptr, nullptr);
         ListView_SetExtendedListViewStyle(hGrid,
             LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
+        g_hGrid = hGrid;
 
         // 그리드 컬럼 추가
         LVCOLUMNW lvc = {}; lvc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
@@ -542,6 +656,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             // 그리드 초기화
             ListView_DeleteAllItems(hGrid);
             g_gridPaths.clear();
+            g_allItems.clear();
+            // 정렬 / 필터 초기화
+            g_sortCol = -1; g_sortDir = 0;
+            SetGridSortArrow(-1, 0);
+            g_filterType.clear();
+            if (hFilterCombo) {
+                // 유형 목록 제거 (인덱스 0 "전체"만 유지)
+                while (ComboBox_GetCount(hFilterCombo) > 1)
+                    ComboBox_DeleteString(hFilterCombo, 1);
+                ComboBox_SetCurSel(hFilterCombo, 0);
+            }
             TabCtrl_SetCurSel(hTab, 0);  // 로그 탭으로 이동
             ShowWindow(hLogEdit, SW_SHOW);
             ShowWindow(hGrid,    SW_HIDE);
@@ -569,6 +694,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
         else if (id == IDC_OPEN_EXCEL_BTN && !g_xlsxPath.empty()) {
             ShellExecuteW(hwnd, L"open", g_xlsxPath.c_str(), nullptr, nullptr, SW_SHOW);
+        }
+        else if (id == IDC_FILTER_COMBO && HIWORD(wParam) == CBN_SELCHANGE) {
+            int sel = ComboBox_GetCurSel(hFilterCombo);
+            if (sel <= 0) {
+                g_filterType.clear();      // 전체 (필터 없음)
+            } else {
+                wchar_t buf[128] = {};
+                ComboBox_GetLBText(hFilterCombo, sel, buf);
+                g_filterType = buf;
+            }
+            RebuildGrid();
         }
         return 0;
     }
@@ -645,6 +781,21 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         // 맨 아래로 스크롤
         ListView_EnsureVisible(hGrid, row, FALSE);
 
+        // 전체 결과 사본 저장 (정렬/필터 재구성용)
+        g_allItems.push_back(*ri);
+
+        // 필터 콤보에 신규 탐지 유형 추가
+        if (g_hFilterCombo) {
+            int cnt = ComboBox_GetCount(g_hFilterCombo);
+            bool found = false;
+            for (int i = 1; i < cnt; i++) {
+                wchar_t buf[128] = {};
+                ComboBox_GetLBText(g_hFilterCombo, i, buf);
+                if (ri->typeName == buf) { found = true; break; }
+            }
+            if (!found) ComboBox_AddString(g_hFilterCombo, ri->typeName.c_str());
+        }
+
         delete ri;
         return 0;
     }
@@ -658,6 +809,22 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             int sel = TabCtrl_GetCurSel(hTab);
             ShowWindow(hLogEdit, sel == 0 ? SW_SHOW : SW_HIDE);
             ShowWindow(hGrid,    sel == 1 ? SW_SHOW : SW_HIDE);
+        }
+
+        // 컬럼 헤더 클릭 → 3단계 정렬 사이클 (오름차↑ → 내림차↓ → 없음)
+        if (hdr->hwndFrom == hGrid && hdr->code == LVN_COLUMNCLICK) {
+            auto* nmlv = reinterpret_cast<NMLISTVIEW*>(lParam);
+            int col = nmlv->iSubItem;
+            if (g_sortCol == col) {
+                // 동일 컬럼: 1→-1→0 사이클
+                if      (g_sortDir ==  1) g_sortDir = -1;
+                else if (g_sortDir == -1) { g_sortDir = 0; g_sortCol = -1; }
+            } else {
+                g_sortCol = col;
+                g_sortDir = 1;
+            }
+            SetGridSortArrow(g_sortCol, g_sortDir);
+            RebuildGrid();
         }
 
         // ListView 더블클릭 → 파일 열기 + 탐색기에서 폴더 열기
