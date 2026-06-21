@@ -19,6 +19,7 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <commctrl.h>
+#include <commdlg.h>
 #include <shlobj.h>
 #include <shlwapi.h>
 #include <shellapi.h>
@@ -57,6 +58,8 @@
 #define IDC_TAB                 115
 #define IDC_GRID                116
 #define IDC_FILTER_COMBO        118   // 탐지 유형 필터 드롭다운
+#define IDC_KEYWORD_EDIT        119   // 파일 키워드 검색 입력창
+#define IDC_KEYWORD_FILE_BTN    120   // 키워드 파일 불러오기 버튼
 
 // 우클릭 컨텍스트 메뉴 ID
 #define IDM_OPEN_FILE   201
@@ -82,6 +85,18 @@ struct ScanResultItem {
     std::wstring maskedText;  // 마스킹 값
     int          lineNumber = 0;
     std::wstring context;     // 맥락 (앞뒤 텍스트)
+};
+
+// ============================================================
+// 파일 키워드 필터
+// ============================================================
+struct KeywordFilter {
+    std::vector<std::wstring> orTerms;   // 스페이스 구분 OR 조건 (하나라도 일치)
+    std::vector<std::wstring> andTerms;  // + 접두사 AND 조건 (모두 일치)
+    std::vector<std::wstring> notTerms;  // - 접두사 NOT 조건 (모두 불일치)
+    bool empty() const {
+        return orTerms.empty() && andTerms.empty() && notTerms.empty();
+    }
 };
 
 // ============================================================
@@ -174,7 +189,114 @@ struct ScanConfig {
     bool         skipImages  = true;
     int          numThreads  = 0;        // 0 = 자동
     LONGLONG     maxFileSize = 100LL * 1024 * 1024;
+    KeywordFilter keywordFilter;         // 파일 이름/경로 키워드 필터
 };
+
+// ============================================================
+// 키워드 필터 헬퍼 (보안: 길이 제한, 입력 검증)
+// ============================================================
+
+// 유니코드 소문자 변환 (CharLowerBuffW - 한국어 포함 완전 지원)
+static std::wstring ToLowerW(const std::wstring& s) {
+    if (s.empty()) return s;
+    std::wstring r = s;
+    CharLowerBuffW(&r[0], (DWORD)r.size());
+    return r;
+}
+
+// 키워드 한 줄 파싱: 스페이스=OR, +필수(AND), -배제(NOT), #주석
+// 보안: 토큰 길이 256자 제한, 최대 100개 토큰
+static KeywordFilter ParseKeywordLine(const std::wstring& line) {
+    KeywordFilter kf;
+    std::wistringstream iss(line);
+    std::wstring token;
+    int count = 0;
+    while (iss >> token && count < 100) {
+        if (token.size() > 256) token = token.substr(0, 256); // 길이 제한
+        if (token[0] == L'#') break;                          // 주석 → 이후 무시
+        else if (token[0] == L'+' && token.size() > 1) kf.andTerms.push_back(token.substr(1));
+        else if (token[0] == L'-' && token.size() > 1) kf.notTerms.push_back(token.substr(1));
+        else if (!token.empty())                        kf.orTerms.push_back(token);
+        ++count;
+    }
+    return kf;
+}
+
+// 텍스트 파일에서 키워드 로드 (UTF-8 / ANSI 자동 감지)
+// 보안: 파일 크기 64KB 제한, 500줄 제한
+static KeywordFilter LoadKeywordsFromFile(const std::wstring& filePath) {
+    KeywordFilter kf;
+    if (filePath.empty() || filePath.size() > MAX_PATH) return kf;
+
+    WIN32_FILE_ATTRIBUTE_DATA fad = {};
+    if (!GetFileAttributesExW(filePath.c_str(), GetFileExInfoStandard, &fad)) return kf;
+    ULONGLONG fileSize = ((ULONGLONG)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+    if (fileSize == 0 || fileSize > 65536) return kf;            // 64KB 제한
+
+    HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) return kf;
+
+    std::vector<char> buf((size_t)fileSize, 0);
+    DWORD read = 0;
+    bool ok = ReadFile(hFile, buf.data(), (DWORD)fileSize, &read, nullptr);
+    CloseHandle(hFile);
+    if (!ok || read == 0) return kf;
+
+    // 널바이트 제거 (보안)
+    for (auto& c : buf) if (c == '\0') c = ' ';
+
+    // UTF-8 우선 시도, 실패 시 ANSI
+    std::wstring content;
+    int wlen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+        buf.data(), (int)read, nullptr, 0);
+    if (wlen > 0) {
+        content.resize(wlen);
+        MultiByteToWideChar(CP_UTF8, 0, buf.data(), (int)read, &content[0], wlen);
+    } else {
+        wlen = MultiByteToWideChar(CP_ACP, 0, buf.data(), (int)read, nullptr, 0);
+        if (wlen <= 0) return kf;
+        content.resize(wlen);
+        MultiByteToWideChar(CP_ACP, 0, buf.data(), (int)read, &content[0], wlen);
+    }
+
+    // 줄 단위 파싱 (최대 500줄)
+    std::wistringstream iss(content);
+    std::wstring line;
+    int lineCount = 0;
+    while (std::getline(iss, line) && lineCount < 500) {
+        if (!line.empty() && line.back() == L'\r') line.pop_back();
+        size_t s = line.find_first_not_of(L" \t");
+        if (s == std::wstring::npos || line[s] == L'#') continue;
+        line = line.substr(s);
+        auto lineKf = ParseKeywordLine(line);
+        for (auto& t : lineKf.orTerms)  kf.orTerms.push_back(t);
+        for (auto& t : lineKf.andTerms) kf.andTerms.push_back(t);
+        for (auto& t : lineKf.notTerms) kf.notTerms.push_back(t);
+        ++lineCount;
+    }
+    return kf;
+}
+
+// 파일 경로가 키워드 필터 조건에 부합하는지 검사
+// 평가 순서: NOT 우선 → AND → OR
+static bool MatchesKeywordFilter(const std::wstring& filePath, const KeywordFilter& kf) {
+    if (kf.empty()) return true;
+    std::wstring lPath = ToLowerW(filePath);
+
+    for (const auto& t : kf.notTerms)
+        if (lPath.find(ToLowerW(t)) != std::wstring::npos) return false;
+
+    for (const auto& t : kf.andTerms)
+        if (lPath.find(ToLowerW(t)) == std::wstring::npos) return false;
+
+    if (!kf.orTerms.empty()) {
+        for (const auto& t : kf.orTerms)
+            if (lPath.find(ToLowerW(t)) != std::wstring::npos) return true;
+        return false;
+    }
+    return true;
+}
 
 // ============================================================
 // 백그라운드 스캔 스레드
@@ -202,6 +324,17 @@ static void ScanThread(HWND hwnd, ScanConfig cfg) {
     std::vector<FileEntry> files = scanner.scanFiles(cfg.scanPath, nullptr);
 
     if (!g_running) { PostLog(hwnd, L"[취소됨]"); PostMessageW(hwnd, WM_SCAN_COMPLETE, 0, 0); return; }
+
+    // 키워드 필터 적용 (파일 이름/경로 기준)
+    if (!cfg.keywordFilter.empty()) {
+        size_t before = files.size();
+        files.erase(std::remove_if(files.begin(), files.end(),
+            [&](const FileEntry& f) {
+                return !MatchesKeywordFilter(f.fullPath, cfg.keywordFilter);
+            }), files.end());
+        PostLog(hwnd, L"  ✓ 키워드 필터: " + std::to_wstring(before)
+            + L"개 → " + std::to_wstring(files.size()) + L"개 파일 선택");
+    }
 
     int totalFiles = (int)files.size();
     g_total.store(totalFiles);
@@ -484,6 +617,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     static HWND hTab, hGrid;
     static HWND hHtmlBtn,  hExcelBtn;
     static HWND hFilterCombo;
+    static HWND hKeywordEdit, hKeywordFileBtn;
 
     switch (msg) {
 
@@ -534,7 +668,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         SetWindowTextW(hOutEdit, exeDir);
         y += 34;
 
-        // 행3: 옵션
+        // 행3: 파일 키워드 검색
+        mkLabel(L"키워드 검색:", M, y+3, 76, 20);
+        hKeywordEdit = mkEdit(IDC_KEYWORD_EDIT, 92, y, 628, 24);
+        SendMessageW(hKeywordEdit, EM_LIMITTEXT, 2048, 0);   // 2KB 제한 (보안)
+        SendMessageW(hKeywordEdit, EM_SETCUEBANNER, FALSE,
+            (LPARAM)L"스페이스=OR  +필수단어  -제외단어  확장자포함  예) 계약서 +2024 -임시 .xlsx");
+        hKeywordFileBtn = mkBtn(IDC_KEYWORD_FILE_BTN, L"파일...", 726, y, 50, 24);
+        y += 34;
+
+        // 행4: 옵션
         hSkipChk = CreateWindowW(L"BUTTON", L"이미지 OCR 건너뜀 (빠른 스캔)",
             WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, M, y+2, 220, 22,
             hwnd, (HMENU)IDC_SKIP_IMAGES_CHK, nullptr, nullptr);
@@ -663,6 +806,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 if (mb > 0 && mb <= 10240) cfg.maxFileSize = mb * 1024 * 1024;
             } catch (...) {}
 
+            // 키워드 필터 파싱 (직접 입력)
+            std::wstring kwText = GetCtrlText(hKeywordEdit);
+            if (!kwText.empty()) cfg.keywordFilter = ParseKeywordLine(kwText);
+
             // 출력 폴더 기본값
             if (cfg.outputDir.empty()) {
                 wchar_t exeDir[MAX_PATH] = {};
@@ -716,6 +863,30 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
         else if (id == IDC_OPEN_EXCEL_BTN && !g_xlsxPath.empty()) {
             ShellExecuteW(hwnd, L"open", g_xlsxPath.c_str(), nullptr, nullptr, SW_SHOW);
+        }
+        else if (id == IDC_KEYWORD_FILE_BTN) {
+            // 키워드 텍스트 파일 선택 (보안: 사용자가 명시적으로 파일 선택)
+            wchar_t filePath[MAX_PATH] = {};
+            OPENFILENAMEW ofn       = {};
+            ofn.lStructSize         = sizeof(ofn);
+            ofn.hwndOwner           = hwnd;
+            ofn.lpstrFilter         = L"텍스트 파일\0*.txt\0모든 파일\0*.*\0";
+            ofn.lpstrFile           = filePath;
+            ofn.nMaxFile            = MAX_PATH;
+            ofn.lpstrTitle          = L"키워드 파일 선택";
+            ofn.Flags               = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST
+                                      | OFN_HIDEREADONLY;
+            if (GetOpenFileNameW(&ofn)) {
+                KeywordFilter kf = LoadKeywordsFromFile(filePath);
+                // 로드한 키워드를 편집창에 표시 (OR 토큰 병합)
+                std::wstring preview;
+                for (auto& t : kf.andTerms) preview += L"+" + t + L" ";
+                for (auto& t : kf.notTerms) preview += L"-" + t + L" ";
+                for (auto& t : kf.orTerms)  preview += t + L" ";
+                if (!preview.empty() && preview.back() == L' ')
+                    preview.pop_back();
+                SetWindowTextW(hKeywordEdit, preview.c_str());
+            }
         }
         else if (id == IDC_FILTER_COMBO && HIWORD(wParam) == CBN_SELCHANGE) {
             int sel = ComboBox_GetCurSel(hFilterCombo);
@@ -918,8 +1089,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     wc.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
     RegisterClassExW(&wc);
 
-    // 실제 클라이언트 크기 계산 (960 × 660)
-    RECT rc = {0, 0, 960, 660};
+    // 실제 클라이언트 크기 계산 (960 × 694, 키워드 행 34px 추가)
+    RECT rc = {0, 0, 960, 694};
     AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX, FALSE);
 
     g_hwnd = CreateWindowExW(

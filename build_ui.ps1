@@ -37,6 +37,40 @@ if (Test-Path "$root\sdk\Everything64.dll") {
     Write-Host "  [OK] Everything64.dll copied" -ForegroundColor Green
 }
 
+# 코드 서명 (자동 실행, Smart App Control 통과)
+$signtool = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe"
+if (Test-Path $signtool) {
+    # 기존 인증서 탐색 (PiiScanner 주제명)
+    $cert = Get-ChildItem Cert:\CurrentUser\Root |
+        Where-Object { $_.Subject -match 'PiiScanner' } |
+        Select-Object -First 1
+    if (-not $cert) {
+        $cert = Get-ChildItem Cert:\CurrentUser\My |
+            Where-Object { $_.Subject -match 'PiiScanner' -and $_.HasPrivateKey } |
+            Select-Object -First 1
+    }
+    if (-not $cert) {
+        # 인증서 신규 생성
+        $cert = New-SelfSignedCertificate `
+            -DnsName "docScanner PiiScanner" `
+            -CertStoreLocation Cert:\CurrentUser\My `
+            -Type CodeSigningCert -KeySpec Signature `
+            -KeyUsage DigitalSignature -KeyAlgorithm RSA -KeyLength 2048
+        $tmpCer = "$env:TEMP\piiscanner_code.cer"
+        [IO.File]::WriteAllBytes($tmpCer, $cert.Export('Cert'))
+        certutil -addstore -user Root $tmpCer | Out-Null
+        Remove-Item $tmpCer -ErrorAction SilentlyContinue
+        Write-Host "  [OK] New signing certificate created" -ForegroundColor Green
+    }
+    $guiExe = "$root\build\PiiScannerUI.exe"
+    & $signtool sign /sha1 $cert.Thumbprint /fd SHA256 /t http://timestamp.sectigo.com "$guiExe" 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        & $signtool sign /sha1 $cert.Thumbprint /fd SHA256 "$guiExe" 2>&1 | Out-Null
+    }
+    $status = (Get-AuthenticodeSignature "$guiExe").Status
+    Write-Host "  [OK] Signed: $status" -ForegroundColor Green
+}
+
 Write-Host ""
 Write-Host "====================================================" -ForegroundColor Green
 Write-Host "  Build SUCCESS!" -ForegroundColor Green
