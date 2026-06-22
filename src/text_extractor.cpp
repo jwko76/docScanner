@@ -245,6 +245,30 @@ static void extractTagText(const std::wstring& xml,
     }
 }
 
+// ============================================================
+// Win32 재귀 디렉터리 삭제 (cmd.exe / _wsystem 사용 안 함)
+// ============================================================
+static void DeleteDirectoryRecursive(const std::wstring& dir) {
+    std::wstring pattern = dir + L"\\*";
+    WIN32_FIND_DATAW fd = {};
+    HANDLE hFind = FindFirstFileW(pattern.c_str(), &fd);
+    if (hFind == INVALID_HANDLE_VALUE) return;
+    do {
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0)
+            continue;
+        std::wstring child = dir + L"\\" + fd.cFileName;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            DeleteDirectoryRecursive(child);
+        } else {
+            // 읽기 전용 속성 해제 후 삭제
+            SetFileAttributesW(child.c_str(), FILE_ATTRIBUTE_NORMAL);
+            DeleteFileW(child.c_str());
+        }
+    } while (FindNextFileW(hFind, &fd));
+    FindClose(hFind);
+    RemoveDirectoryW(dir.c_str());
+}
+
 ExtractionResult TextExtractor::extractOoxml(const std::wstring& filePath,
                                                const std::wstring& extension) {
     ExtractionResult res;
@@ -338,9 +362,7 @@ ExtractionResult TextExtractor::extractOoxml(const std::wstring& filePath,
 
     if (!expanded) {
         res.errorMessage = L"OOXML 압축 해제 실패";
-        // 임시 폴더 삭제
-        std::wstring rmCmd = L"rd /s /q \"" + tmpFolder + L"\"";
-        _wsystem(rmCmd.c_str());
+        DeleteDirectoryRecursive(tmpFolder);   // cmd 없이 Win32로 직접 삭제
         return res;
     }
 
@@ -367,9 +389,7 @@ ExtractionResult TextExtractor::extractOoxml(const std::wstring& filePath,
         }
     }
 
-    // 임시 폴더 삭제
-    std::wstring rmCmd = L"rd /s /q \"" + tmpFolder + L"\"";
-    _wsystem(rmCmd.c_str());
+    DeleteDirectoryRecursive(tmpFolder);   // cmd 없이 Win32로 직접 삭제
 
     if (text.empty()) {
         res.errorMessage = L"OOXML에서 텍스트를 추출하지 못함";

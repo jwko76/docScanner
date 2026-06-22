@@ -60,6 +60,7 @@
 #define IDC_FILTER_COMBO        118   // 탐지 유형 필터 드롭다운
 #define IDC_KEYWORD_EDIT        119   // 파일 키워드 검색 입력창
 #define IDC_KEYWORD_FILE_BTN    120   // 키워드 파일 불러오기 버튼
+#define IDC_LOAD_COMBO          121   // CPU 부하 수준 (낮음/중간/높음)
 
 // 우클릭 컨텍스트 메뉴 ID
 #define IDM_OPEN_FILE   201
@@ -121,6 +122,8 @@ static std::wstring g_filterType;
 // 핵심 컨트롤 핸들 (WndProc 외부 접근용)
 static HWND         g_hGrid        = nullptr;
 static HWND         g_hFilterCombo = nullptr;
+static HWND         g_hLoadCombo   = nullptr;
+static bool         g_firstResult  = false;  // 첫 탐지 결과 수신 여부 (실시간 탭 전환용)
 
 // ============================================================
 // 유틸
@@ -187,7 +190,7 @@ struct ScanConfig {
     std::wstring scanPath;
     std::wstring outputDir;
     bool         skipImages  = true;
-    int          numThreads  = 0;        // 0 = 자동
+    int          loadLevel   = 1;        // 0=낮음(~25%), 1=중간(~50%), 2=높음(100%)
     LONGLONG     maxFileSize = 100LL * 1024 * 1024;
     KeywordFilter keywordFilter;         // 파일 이름/경로 키워드 필터
 };
@@ -355,16 +358,35 @@ static void ScanThread(HWND hwnd, ScanConfig cfg) {
     }
 
     // Step 3: PII 스캔 (멀티스레드)
-    int nThreads = (cfg.numThreads > 0)
-        ? cfg.numThreads
-        : std::max(1, (int)std::thread::hardware_concurrency());
-    PostLog(hwnd, L"[3/4] 개인정보 스캔 중 (스레드 " + std::to_wstring(nThreads) + L"개)...");
+    int nCores = std::max(1, (int)std::thread::hardware_concurrency());
+    int nThreads;
+    int threadPriority;
+    switch (cfg.loadLevel) {
+    case 0:  // 낮음: 코어의 25%, 우선순위 낮춤
+        nThreads       = std::max(1, nCores / 4);
+        threadPriority = THREAD_PRIORITY_BELOW_NORMAL;
+        break;
+    case 2:  // 높음: 코어 100%, 기본 우선순위
+        nThreads       = nCores;
+        threadPriority = THREAD_PRIORITY_NORMAL;
+        break;
+    default: // 중간(기본): 코어의 50%, 우선순위 낮춤
+        nThreads       = std::max(1, nCores / 2);
+        threadPriority = THREAD_PRIORITY_BELOW_NORMAL;
+        break;
+    }
+    const wchar_t* loadNames[] = { L"낮음", L"중간", L"높음" };
+    int nameIdx = (cfg.loadLevel >= 0 && cfg.loadLevel <= 2) ? cfg.loadLevel : 1;
+    PostLog(hwnd, L"[3/4] 개인정보 스캔 중 (스레드 " + std::to_wstring(nThreads)
+        + L"개 / " + std::to_wstring(nCores) + L"코어, 부하: "
+        + loadNames[nameIdx] + L")...");
 
     std::vector<FileScanResult> results(files.size());
     std::atomic<int> nextIdx{0};
     std::atomic<int> done{0};
 
-    auto worker = [&]() {
+    auto worker = [&, threadPriority]() {
+      SetThreadPriority(GetCurrentThread(), threadPriority);
       try {
         TextExtractor extractor;
         extractor.setMaxTextLength(2'000'000);
@@ -609,7 +631,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     // 컨트롤 핸들 (정적으로 유지)
     static HWND hScanEdit, hScanBrowse;
     static HWND hOutEdit,  hOutBrowse;
-    static HWND hSkipChk,  hThreadsEdit, hMaxSizeEdit;
+    static HWND hSkipChk,  hLoadCombo, hMaxSizeEdit;
     static HWND hStartBtn, hStopBtn;
     static HWND hProgress;
     static HWND hStatus;
@@ -684,10 +706,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         SendMessageW(hSkipChk, WM_SETFONT, (WPARAM)hF, TRUE);
         SendMessageW(hSkipChk, BM_SETCHECK, BST_CHECKED, 0);
 
-        mkLabel(L"스레드:", 240, y+3, 55, 20);
-        hThreadsEdit = mkEdit(IDC_THREADS_EDIT, 298, y, 45, 24, ES_NUMBER);
-        SetWindowTextW(hThreadsEdit, L"0");
-        mkLabel(L"(0=자동)", 348, y+3, 65, 20);
+        mkLabel(L"부하:", 240, y+3, 36, 20);
+        hLoadCombo = CreateWindowW(L"COMBOBOX", L"",
+            WS_CHILD|WS_VISIBLE|CBS_DROPDOWNLIST,
+            278, y, 116, 120, hwnd, (HMENU)IDC_LOAD_COMBO, nullptr, nullptr);
+        SendMessageW(hLoadCombo, WM_SETFONT, (WPARAM)hF, TRUE);
+        ComboBox_AddString(hLoadCombo, L"낮음 (~25%)");
+        ComboBox_AddString(hLoadCombo, L"중간 (~50%)");
+        ComboBox_AddString(hLoadCombo, L"높음 (100%)");
+        ComboBox_SetCurSel(hLoadCombo, 1);   // 기본: 중간 (50%)
+        g_hLoadCombo = hLoadCombo;
 
         mkLabel(L"최대 크기(MB):", 425, y+3, 95, 20);
         hMaxSizeEdit = mkEdit(IDC_MAXSIZE_EDIT, 524, y, 55, 24, ES_NUMBER);
@@ -800,7 +828,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             cfg.scanPath   = GetCtrlText(hScanEdit);
             cfg.outputDir  = GetCtrlText(hOutEdit);
             cfg.skipImages = (SendMessageW(hSkipChk, BM_GETCHECK, 0, 0) == BST_CHECKED);
-            try { cfg.numThreads = std::stoi(GetCtrlText(hThreadsEdit)); } catch (...) { cfg.numThreads = 0; }
+            if (g_hLoadCombo) {
+                cfg.loadLevel = ComboBox_GetCurSel(g_hLoadCombo);
+                if (cfg.loadLevel < 0) cfg.loadLevel = 1;
+            }
             try {
                 long long mb = std::stoll(GetCtrlText(hMaxSizeEdit));
                 if (mb > 0 && mb <= 10240) cfg.maxFileSize = mb * 1024 * 1024;
@@ -826,6 +857,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             ListView_DeleteAllItems(hGrid);
             g_gridPaths.clear();
             g_allItems.clear();
+            g_firstResult = false;
             // 정렬 / 필터 초기화
             g_sortCol = -1; g_sortDir = 0;
             SetGridSortArrow(-1, 0);
@@ -976,6 +1008,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         // 전체 결과 사본 저장 (정렬/필터 재구성용)
         g_allItems.push_back(*ri);
+
+        // 첫 탐지 결과 도착 → 자동으로 결과 탭으로 전환 (스캔 중 실시간 확인)
+        if (!g_firstResult) {
+            g_firstResult = true;
+            TabCtrl_SetCurSel(hTab, 1);
+            ShowWindow(hLogEdit, SW_HIDE);
+            ShowWindow(hGrid,    SW_SHOW);
+        }
 
         // 필터 콤보에 신규 탐지 유형 추가
         if (g_hFilterCombo) {
