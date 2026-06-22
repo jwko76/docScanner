@@ -61,6 +61,7 @@
 #define IDC_KEYWORD_EDIT        119   // 파일 키워드 검색 입력창
 #define IDC_KEYWORD_FILE_BTN    120   // 키워드 파일 불러오기 버튼
 #define IDC_LOAD_COMBO          121   // CPU 부하 수준 (낮음/중간/높음)
+#define IDC_FILE_GRID           122   // 키워드 매칭 파일 목록 그리드
 
 // 우클릭 컨텍스트 메뉴 ID
 #define IDM_OPEN_FILE   201
@@ -74,6 +75,7 @@
 #define WM_SCAN_COMPLETE  (WM_APP + 3)   // wParam = piiFound, lParam = filesWithPii
 #define WM_SCAN_FILES     (WM_APP + 4)   // wParam = totalFiles
 #define WM_SCAN_RESULT    (WM_APP + 5)   // wParam = heap ScanResultItem* (수신 측에서 delete)
+#define WM_SCAN_FILELIST  (WM_APP + 6)   // wParam = heap vector<FileListItem>* (수신 측에서 delete)
 
 // ============================================================
 // 스캔 결과 아이템 (스레드 → UI 전달용)
@@ -86,6 +88,16 @@ struct ScanResultItem {
     std::wstring maskedText;  // 마스킹 값
     int          lineNumber = 0;
     std::wstring context;     // 맥락 (앞뒤 텍스트)
+};
+
+// ============================================================
+// 키워드 파일 목록 아이템 (Step 2 완료 후 UI 전달용)
+// ============================================================
+struct FileListItem {
+    std::wstring filePath;     // 전체 경로
+    std::wstring fileName;     // 파일명만
+    std::wstring extension;    // 확장자
+    LONGLONG     fileSize = 0; // 바이트
 };
 
 // ============================================================
@@ -121,9 +133,12 @@ static int          g_sortDir = 0;
 static std::wstring g_filterType;
 // 핵심 컨트롤 핸들 (WndProc 외부 접근용)
 static HWND         g_hGrid        = nullptr;
+static HWND         g_hFileGrid    = nullptr;
 static HWND         g_hFilterCombo = nullptr;
 static HWND         g_hLoadCombo   = nullptr;
-static bool         g_firstResult  = false;  // 첫 탐지 결과 수신 여부 (실시간 탭 전환용)
+static bool         g_firstResult  = false;   // 첫 PII 결과 수신 여부 (실시간 탭 전환용)
+// 키워드 파일 목록 (탭1)
+static std::vector<FileListItem> g_allFileItems;
 
 // ============================================================
 // 유틸
@@ -337,6 +352,22 @@ static void ScanThread(HWND hwnd, ScanConfig cfg) {
             }), files.end());
         PostLog(hwnd, L"  ✓ 키워드 필터: " + std::to_wstring(before)
             + L"개 → " + std::to_wstring(files.size()) + L"개 파일 선택");
+
+        // 키워드 매칭 파일 목록 → UI(탭1) 전송
+        {
+            auto* flist = new std::vector<FileListItem>();
+            flist->reserve(files.size());
+            for (const auto& f : files) {
+                FileListItem fi;
+                fi.filePath  = f.fullPath;
+                auto sl = f.fullPath.find_last_of(L"\\/");
+                fi.fileName  = (sl != std::wstring::npos) ? f.fullPath.substr(sl + 1) : f.fullPath;
+                fi.extension = f.extension;
+                fi.fileSize  = f.fileSize;
+                flist->push_back(std::move(fi));
+            }
+            PostMessageW(hwnd, WM_SCAN_FILELIST, (WPARAM)flist, 0);
+        }
     }
 
     int totalFiles = (int)files.size();
@@ -509,8 +540,10 @@ static void ScanThread(HWND hwnd, ScanConfig cfg) {
 static const int W  = 960;   // 클라이언트 폭
 static const int M  = 12;    // 마진
 
-// 그리드 컬럼 인덱스
+// 개인정보 탐지 그리드 컬럼
 enum GridCol { GC_FILE=0, GC_TYPE, GC_VALUE, GC_MASKED, GC_LINE, GC_CONTEXT, GC_COUNT };
+// 키워드 파일 목록 그리드 컬럼
+enum FileGridCol { GFC_FILE=0, GFC_EXT, GFC_SIZE, GFC_PATH, GFC_FCOUNT };
 
 // ============================================================
 // 그리드 정렬 / 필터 헬퍼
@@ -636,7 +669,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     static HWND hProgress;
     static HWND hStatus;
     static HWND hLogEdit;
-    static HWND hTab, hGrid;
+    static HWND hTab, hGrid, hFileGrid;
     static HWND hHtmlBtn,  hExcelBtn;
     static HWND hFilterCombo;
     static HWND hKeywordEdit, hKeywordFileBtn;
@@ -761,8 +794,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             TCITEMW ti = {}; ti.mask = TCIF_TEXT;
             ti.pszText = const_cast<LPWSTR>(L"로그");
             TabCtrl_InsertItem(hTab, 0, &ti);
-            ti.pszText = const_cast<LPWSTR>(L"스캔 결과");
+            ti.pszText = const_cast<LPWSTR>(L"키워드 파일");
             TabCtrl_InsertItem(hTab, 1, &ti);
+            ti.pszText = const_cast<LPWSTR>(L"개인정보 탐지");
+            TabCtrl_InsertItem(hTab, 2, &ti);
         }
 
         // 탭 내용 영역 계산
@@ -779,7 +814,26 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         SendMessageW(hLogEdit, WM_SETFONT, (WPARAM)hF, TRUE);
         SendMessageW(hLogEdit, EM_LIMITTEXT, 0x200000, 0);
 
-        // 탭1: ListView 결과 그리드 (초기 숨김)
+        // 탭1: 키워드 매칭 파일 목록 그리드 (초기 숨김)
+        hFileGrid = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
+            WS_CHILD|LVS_REPORT|LVS_SHOWSELALWAYS,
+            cx, cy, cw, ch, hwnd, (HMENU)IDC_FILE_GRID, nullptr, nullptr);
+        ListView_SetExtendedListViewStyle(hFileGrid,
+            LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
+        g_hFileGrid = hFileGrid;
+        {
+            LVCOLUMNW lvc2 = {}; lvc2.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+            auto addFCol = [&](int sub, LPWSTR hdr, int w) {
+                lvc2.iSubItem = sub; lvc2.pszText = hdr; lvc2.cx = w;
+                ListView_InsertColumn(hFileGrid, sub, &lvc2);
+            };
+            addFCol(GFC_FILE, const_cast<LPWSTR>(L"파일명"),    200);
+            addFCol(GFC_EXT,  const_cast<LPWSTR>(L"확장자"),     60);
+            addFCol(GFC_SIZE, const_cast<LPWSTR>(L"크기(KB)"),   80);
+            addFCol(GFC_PATH, const_cast<LPWSTR>(L"전체 경로"), cw-350);
+        }
+
+        // 탭2: 개인정보 탐지 결과 그리드 (초기 숨김)
         hGrid = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
             WS_CHILD|LVS_REPORT|LVS_SHOWSELALWAYS,
             cx, cy, cw, ch, hwnd, (HMENU)IDC_GRID, nullptr, nullptr);
@@ -857,6 +911,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             ListView_DeleteAllItems(hGrid);
             g_gridPaths.clear();
             g_allItems.clear();
+            ListView_DeleteAllItems(hFileGrid);
+            g_allFileItems.clear();
             g_firstResult = false;
             // 정렬 / 필터 초기화
             g_sortCol = -1; g_sortDir = 0;
@@ -869,8 +925,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 ComboBox_SetCurSel(hFilterCombo, 0);
             }
             TabCtrl_SetCurSel(hTab, 0);  // 로그 탭으로 이동
-            ShowWindow(hLogEdit, SW_SHOW);
-            ShowWindow(hGrid,    SW_HIDE);
+            ShowWindow(hLogEdit,  SW_SHOW);
+            ShowWindow(hFileGrid, SW_HIDE);
+            ShowWindow(hGrid,     SW_HIDE);
 
             SetWindowTextW(hLogEdit, L"");
             SendMessageW(hProgress, PBM_SETPOS, 0, 0);
@@ -968,12 +1025,44 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         EnableWindow(hStopBtn,   FALSE);
         if (!g_htmlPath.empty())  EnableWindow(hHtmlBtn,  TRUE);
         if (!g_xlsxPath.empty())  EnableWindow(hExcelBtn, TRUE);
-        // 탐지 결과가 있으면 스캔 결과 탭으로 자동 전환
+        // 탐지 결과가 있으면 개인정보 탐지 탭(2)으로 자동 전환
         if (pii > 0) {
-            TabCtrl_SetCurSel(hTab, 1);
-            ShowWindow(hLogEdit, SW_HIDE);
-            ShowWindow(hGrid,    SW_SHOW);
+            TabCtrl_SetCurSel(hTab, 2);
+            ShowWindow(hLogEdit,  SW_HIDE);
+            ShowWindow(hFileGrid, SW_HIDE);
+            ShowWindow(hGrid,     SW_SHOW);
         }
+        return 0;
+    }
+
+    // ── 키워드 매칭 파일 목록 → 탭1 그리드 ─────────────────
+    case WM_SCAN_FILELIST: {
+        auto* flist = reinterpret_cast<std::vector<FileListItem>*>(wParam);
+        if (!flist) return 0;
+        g_allFileItems = std::move(*flist);
+        delete flist;
+
+        // 파일 목록 그리드 구성
+        SendMessageW(hFileGrid, WM_SETREDRAW, FALSE, 0);
+        ListView_DeleteAllItems(hFileGrid);
+        for (const auto& fi : g_allFileItems) {
+            int row = ListView_GetItemCount(hFileGrid);
+            LVITEMW lvi = {}; lvi.mask = LVIF_TEXT; lvi.iItem = row; lvi.iSubItem = 0;
+            lvi.pszText = const_cast<LPWSTR>(fi.fileName.c_str());
+            ListView_InsertItem(hFileGrid, &lvi);
+            ListView_SetItemText(hFileGrid, row, GFC_EXT,  const_cast<LPWSTR>(fi.extension.c_str()));
+            std::wstring sz = std::to_wstring(fi.fileSize / 1024) + L" KB";
+            ListView_SetItemText(hFileGrid, row, GFC_SIZE, const_cast<LPWSTR>(sz.c_str()));
+            ListView_SetItemText(hFileGrid, row, GFC_PATH, const_cast<LPWSTR>(fi.filePath.c_str()));
+        }
+        SendMessageW(hFileGrid, WM_SETREDRAW, TRUE, 0);
+        InvalidateRect(hFileGrid, nullptr, TRUE);
+
+        // 키워드 파일 탭(1)으로 자동 전환
+        TabCtrl_SetCurSel(hTab, 1);
+        ShowWindow(hLogEdit,  SW_HIDE);
+        ShowWindow(hFileGrid, SW_SHOW);
+        ShowWindow(hGrid,     SW_HIDE);
         return 0;
     }
 
@@ -1009,12 +1098,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         // 전체 결과 사본 저장 (정렬/필터 재구성용)
         g_allItems.push_back(*ri);
 
-        // 첫 탐지 결과 도착 → 자동으로 결과 탭으로 전환 (스캔 중 실시간 확인)
+        // 첫 탐지 결과 도착 → 로그 탭에서만 자동으로 개인정보 탐지 탭(2)으로 전환
+        // (키워드 파일 탭(1)을 보고 있으면 유지 — 사용자가 파일 목록 확인 중)
         if (!g_firstResult) {
             g_firstResult = true;
-            TabCtrl_SetCurSel(hTab, 1);
-            ShowWindow(hLogEdit, SW_HIDE);
-            ShowWindow(hGrid,    SW_SHOW);
+            if (TabCtrl_GetCurSel(hTab) == 0) {
+                TabCtrl_SetCurSel(hTab, 2);
+                ShowWindow(hLogEdit,  SW_HIDE);
+                ShowWindow(hFileGrid, SW_HIDE);
+                ShowWindow(hGrid,     SW_SHOW);
+            }
         }
 
         // 필터 콤보에 신규 탐지 유형 추가
@@ -1040,8 +1133,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         // 탭 선택 변경
         if (hdr->hwndFrom == hTab && hdr->code == TCN_SELCHANGE) {
             int sel = TabCtrl_GetCurSel(hTab);
-            ShowWindow(hLogEdit, sel == 0 ? SW_SHOW : SW_HIDE);
-            ShowWindow(hGrid,    sel == 1 ? SW_SHOW : SW_HIDE);
+            ShowWindow(hLogEdit,  sel == 0 ? SW_SHOW : SW_HIDE);
+            ShowWindow(hFileGrid, sel == 1 ? SW_SHOW : SW_HIDE);
+            ShowWindow(hGrid,     sel == 2 ? SW_SHOW : SW_HIDE);
         }
 
         // 컬럼 헤더 클릭 → 3단계 정렬 사이클 (오름차↑ → 내림차↓ → 없음)
@@ -1060,7 +1154,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             RebuildGrid();
         }
 
-        // ListView 더블클릭 → 파일 열기 + 탐색기에서 폴더 열기
+        // 키워드 파일 탭 더블클릭 → 파일 열기
+        if (hdr->hwndFrom == hFileGrid && hdr->code == NM_DBLCLK) {
+            int sel = ListView_GetNextItem(hFileGrid, -1, LVNI_SELECTED);
+            if (sel >= 0 && sel < (int)g_allFileItems.size()) {
+                const std::wstring& path = g_allFileItems[sel].filePath;
+                ShellExecuteW(hwnd, L"open", path.c_str(), nullptr, nullptr, SW_SHOW);
+                std::wstring arg = L"/select,\"" + path + L"\"";
+                ShellExecuteW(hwnd, L"open", L"explorer.exe", arg.c_str(), nullptr, SW_SHOW);
+            }
+        }
+
+        // 개인정보 탐지 탭 더블클릭 → 파일 열기 + 탐색기에서 폴더 열기
         if (hdr->hwndFrom == hGrid && hdr->code == NM_DBLCLK) {
             int sel = ListView_GetNextItem(hGrid, -1, LVNI_SELECTED);
             if (sel >= 0 && sel < (int)g_gridPaths.size()) {
@@ -1078,6 +1183,26 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     // ── 그리드 우클릭 컨텍스트 메뉴 ─────────────────────────
     case WM_CONTEXTMENU: {
+        // 키워드 파일 탭 우클릭
+        if ((HWND)wParam == hFileGrid) {
+            int sel = ListView_GetNextItem(hFileGrid, -1, LVNI_SELECTED);
+            if (sel < 0 || sel >= (int)g_allFileItems.size()) return 0;
+            HMENU hMenu = CreatePopupMenu();
+            AppendMenuW(hMenu, MF_STRING, IDM_OPEN_FILE,   L"파일 열기(&O)");
+            AppendMenuW(hMenu, MF_STRING, IDM_OPEN_FOLDER, L"폴더 열기(&F)");
+            int cmd = (int)TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                LOWORD(lParam), HIWORD(lParam), 0, hwnd, nullptr);
+            DestroyMenu(hMenu);
+            const std::wstring& path = g_allFileItems[sel].filePath;
+            if (cmd == IDM_OPEN_FILE) {
+                ShellExecuteW(hwnd, L"open", path.c_str(), nullptr, nullptr, SW_SHOW);
+            } else if (cmd == IDM_OPEN_FOLDER) {
+                std::wstring arg = L"/select,\"" + path + L"\"";
+                ShellExecuteW(hwnd, L"open", L"explorer.exe", arg.c_str(), nullptr, SW_SHOW);
+            }
+            return 0;
+        }
+        // 개인정보 탐지 탭 우클릭
         if ((HWND)wParam != hGrid) break;
         int sel = ListView_GetNextItem(hGrid, -1, LVNI_SELECTED);
         if (sel < 0 || sel >= (int)g_gridPaths.size()) return 0;
