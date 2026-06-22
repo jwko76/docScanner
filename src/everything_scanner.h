@@ -54,6 +54,9 @@ public:
     static const std::set<std::wstring>& documentExtensions();
     static const std::set<std::wstring>& imageExtensions();
 
+    // 전체 드라이브 스캔 시 자동 제외되는 시스템 경로 목록 (로깅용)
+    static std::vector<std::wstring> systemExcludedPaths();
+
 private:
     bool         m_initialized = false;
     std::wstring m_lastError;

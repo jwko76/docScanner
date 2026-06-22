@@ -337,6 +337,13 @@ static void ScanThread(HWND hwnd, ScanConfig cfg) {
         ? L"전체 드라이브" : cfg.scanPath;
     PostLog(hwnd, L"[2/4] 파일 목록 조회 중 (" + pathDesc + L")...");
 
+    // 전체 드라이브 스캔 시 시스템 폴더 자동 제외 안내
+    if (cfg.scanPath.empty()) {
+        auto excluded = EverythingScanner::systemExcludedPaths();
+        PostLog(hwnd, L"  ℹ 시스템 폴더 " + std::to_wstring(excluded.size())
+            + L"개 자동 제외 (Windows, Program Files, ProgramData, $Recycle.Bin 등)");
+    }
+
     auto tStart = std::chrono::steady_clock::now();
 
     std::vector<FileEntry> files = scanner.scanFiles(cfg.scanPath, nullptr);

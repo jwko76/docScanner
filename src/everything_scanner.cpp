@@ -166,6 +166,95 @@ bool EverythingScanner::loadFunctions() {
 }
 
 // ============================================================
+// 시스템 제외 폴더 (전체 드라이브 스캔 시 자동 적용)
+// - EDR 민감 경로 및 불필요한 시스템 파일 스캔 방지
+// - 환경변수 기반으로 실제 경로 동적 해석
+// ============================================================
+
+static std::wstring sysGetEnvW(const wchar_t* name) {
+    wchar_t buf[MAX_PATH] = {};
+    DWORD len = GetEnvironmentVariableW(name, buf, MAX_PATH);
+    return (len > 0 && len < MAX_PATH) ? std::wstring(buf) : L"";
+}
+
+static std::vector<std::wstring> buildSystemExcludePaths() {
+    std::vector<std::wstring> ex;
+
+    // 끝에 \ 추가 헬퍼 (prefix 비교용)
+    auto addPath = [&](const std::wstring& p) {
+        if (p.empty()) return;
+        ex.push_back(p.back() == L'\\' ? p : (p + L'\\'));
+    };
+
+    // 환경변수 기반 시스템 경로
+    const wchar_t* envVars[] = {
+        L"SystemRoot",          // C:\Windows
+        L"ProgramFiles",        // C:\Program Files
+        L"ProgramW6432",        // C:\Program Files (x86 프로세스에서 64비트 PF)
+        L"ProgramFiles(x86)",   // C:\Program Files (x86)
+        L"ProgramData",         // C:\ProgramData
+        nullptr
+    };
+    for (int i = 0; envVars[i]; ++i)
+        addPath(sysGetEnvW(envVars[i]));
+
+    // 드라이브별 고정 이름 제외 폴더 (모든 마운트된 드라이브에 적용)
+    static const wchar_t* const k_names[] = {
+        L"$Recycle.Bin",
+        L"$RECYCLE.BIN",
+        L"System Volume Information",
+        L"Recovery",
+        L"MSOCache",
+        L"Config.Msi",
+        nullptr
+    };
+    DWORD drives = GetLogicalDrives();
+    for (int i = 0; i < 26; ++i) {
+        if (!(drives & (1u << i))) continue;
+        wchar_t drv[4] = { (wchar_t)(L'A' + i), L':', L'\\', L'\0' };
+        for (int j = 0; k_names[j]; ++j)
+            ex.push_back(std::wstring(drv) + k_names[j] + L"\\");
+    }
+
+    // 대소문자 무시 중복 제거
+    std::sort(ex.begin(), ex.end(), [](const std::wstring& a, const std::wstring& b) {
+        return _wcsicmp(a.c_str(), b.c_str()) < 0;
+    });
+    ex.erase(std::unique(ex.begin(), ex.end(), [](const std::wstring& a, const std::wstring& b) {
+        return _wcsicmp(a.c_str(), b.c_str()) == 0;
+    }), ex.end());
+
+    return ex;
+}
+
+// 캐시된 제외 목록 (정적 — 프로세스 수명 동안 고정)
+static const std::vector<std::wstring>& systemExcludePaths() {
+    static std::vector<std::wstring> s = buildSystemExcludePaths();
+    return s;
+}
+
+// fullPath가 시스템 제외 목록에 해당하는지 검사 (대소문자 무시)
+static bool isSystemExcluded(const std::wstring& fullPath) {
+    for (const auto& excl : systemExcludePaths()) {
+        // excl은 끝에 \ 있음, fullPath가 excl로 시작하면 → 하위 폴더
+        if (fullPath.size() >= excl.size() &&
+            _wcsnicmp(fullPath.c_str(), excl.c_str(), excl.size()) == 0)
+            return true;
+        // 폴더 자체 (끝 \ 제외한 비교)
+        if (!excl.empty() && excl.back() == L'\\') {
+            const std::wstring base = excl.substr(0, excl.size() - 1);
+            if (_wcsicmp(fullPath.c_str(), base.c_str()) == 0) return true;
+        }
+    }
+    return false;
+}
+
+// 공개 접근자 (로깅용)
+std::vector<std::wstring> EverythingScanner::systemExcludedPaths() {
+    return systemExcludePaths();
+}
+
+// ============================================================
 // 검색 쿼리 생성
 // 예) "C:\Users | ext:docx ext:pdf ..." → "path:C:\Users\ ext:docx|ext:pdf|..."
 // Everything 검색 문법 사용
@@ -200,6 +289,18 @@ std::wstring EverythingScanner::buildQuery(const std::wstring& rootPath) {
     addExts(documentExtensions());
     addExts(imageExtensions());
     oss << L")";
+
+    // 전체 드라이브 스캔 시 시스템 폴더 제외 (!path: 구문)
+    // - EDR 민감 경로 스캔 방지, 불필요한 시스템 파일 스킵
+    if (rootPath.empty()) {
+        for (const auto& excl : systemExcludePaths()) {
+            // 보안: 큰따옴표·파이프 제거 (쿼리 인젝션 방지)
+            std::wstring safe = excl;
+            safe.erase(std::remove(safe.begin(), safe.end(), L'"'), safe.end());
+            safe.erase(std::remove(safe.begin(), safe.end(), L'|'), safe.end());
+            oss << L" !path:\"" << safe << L"\"";
+        }
+    }
 
     return oss.str();
 }
@@ -344,6 +445,8 @@ std::vector<FileEntry> EverythingScanner::scanFilesFs(
             if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
                 // [보안] 심볼릭 링크/정션(재파스 포인트) 건너뜀 → 무한 루프 방지
                 if (ffd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
+                // 전체 드라이브 스캔 시 시스템 폴더 제외 (EDR 민감 경로 방지)
+                if (rootPath.empty() && isSystemExcluded(fullPath)) continue;
                 walk(fullPath);
             } else {
                 // 확장자 추출 (소문자)
