@@ -63,6 +63,7 @@
 #define IDC_LOAD_COMBO          121   // CPU 부하 수준 (낮음/중간/높음)
 #define IDC_FILE_GRID           122   // 키워드 매칭 파일 목록 그리드
 #define IDC_CLEAR_RESULT_BTN    123   // 결과 초기화 (UI + 출력 파일 삭제)
+#define IDC_DELETE_OUTPUT_BTN   124   // 출력 폴더의 모든 xls/html 결과 파일 삭제
 
 // 우클릭 컨텍스트 메뉴 ID
 #define IDM_OPEN_FILE   201
@@ -678,7 +679,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     static HWND hStatus;
     static HWND hLogEdit;
     static HWND hTab, hGrid, hFileGrid;
-    static HWND hHtmlBtn,  hExcelBtn, hClearBtn;
+    static HWND hHtmlBtn,  hExcelBtn, hClearBtn, hDeleteOutputBtn;
     static HWND hFilterCombo;
     static HWND hKeywordEdit, hKeywordFileBtn;
 
@@ -722,8 +723,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         // 행2: 출력 경로
         mkLabel(L"출력 경로:", M, y+3, 80, 20);
-        hOutEdit   = mkEdit(IDC_OUTPUT_PATH_EDIT, 96, y, 492, 24);
-        hOutBrowse = mkBtn(IDC_OUTPUT_PATH_BROWSE, L"찾아보기", 594, y, 82, 24);
+        hOutEdit         = mkEdit(IDC_OUTPUT_PATH_EDIT,    96,  y, 492, 24);
+        hOutBrowse       = mkBtn(IDC_OUTPUT_PATH_BROWSE,  L"찾아보기",  594, y,  82, 24);
+        hDeleteOutputBtn = mkBtn(IDC_DELETE_OUTPUT_BTN,   L"파일 삭제", 682, y,  82, 24);
         // 기본값: exe 폴더
         wchar_t exeDir[MAX_PATH] = {};
         GetModuleFileNameW(nullptr, exeDir, MAX_PATH);
@@ -1019,6 +1021,73 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
             EnableWindow(hHtmlBtn,  FALSE);
             EnableWindow(hExcelBtn, FALSE);
+        }
+        else if (id == IDC_DELETE_OUTPUT_BTN) {
+            std::wstring outDir = GetCtrlText(hOutEdit);
+            if (outDir.empty()) {
+                MessageBoxW(hwnd, L"출력 경로가 비어 있습니다.", L"파일 삭제", MB_OK | MB_ICONINFORMATION);
+                break;
+            }
+            // 출력 폴더에서 *.xlsx, *.html 파일 수집
+            std::vector<std::wstring> targets;
+            static const wchar_t* const k_pats[] = { L"*.xlsx", L"*.html", nullptr };
+            for (int pi = 0; k_pats[pi]; ++pi) {
+                std::wstring pattern = outDir;
+                if (pattern.back() != L'\\') pattern += L'\\';
+                pattern += k_pats[pi];
+                WIN32_FIND_DATAW fd = {};
+                HANDLE hF = FindFirstFileW(pattern.c_str(), &fd);
+                if (hF == INVALID_HANDLE_VALUE) continue;
+                do {
+                    if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                    std::wstring dir = outDir;
+                    if (dir.back() != L'\\') dir += L'\\';
+                    targets.push_back(dir + fd.cFileName);
+                } while (FindNextFileW(hF, &fd));
+                FindClose(hF);
+            }
+            if (targets.empty()) {
+                MessageBoxW(hwnd, L"삭제할 xlsx/html 파일이 없습니다.", L"파일 삭제", MB_OK | MB_ICONINFORMATION);
+                break;
+            }
+            // 확인 다이얼로그 (파일 목록 최대 10개 표시)
+            std::wstring listMsg;
+            size_t shown = std::min(targets.size(), (size_t)10);
+            for (size_t i = 0; i < shown; ++i) {
+                // 파일명만 추출
+                auto sl = targets[i].find_last_of(L"\\/");
+                listMsg += L"\n  • " + (sl != std::wstring::npos ? targets[i].substr(sl + 1) : targets[i]);
+            }
+            if (targets.size() > shown)
+                listMsg += L"\n  … 외 " + std::to_wstring(targets.size() - shown) + L"개";
+
+            std::wstring confirmMsg = L"출력 폴더의 xlsx/html 파일 "
+                + std::to_wstring(targets.size()) + L"개를 삭제합니다:"
+                + listMsg + L"\n\n계속하시겠습니까?";
+            if (MessageBoxW(hwnd, confirmMsg.c_str(), L"파일 삭제",
+                            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES)
+                break;
+
+            // 삭제 실행
+            int deleted = 0, failed = 0;
+            for (const auto& f : targets) {
+                SetFileAttributesW(f.c_str(), FILE_ATTRIBUTE_NORMAL);
+                if (DeleteFileW(f.c_str())) {
+                    ++deleted;
+                    // 현재 세션 경로도 초기화
+                    if (_wcsicmp(f.c_str(), g_htmlPath.c_str()) == 0) g_htmlPath.clear();
+                    if (_wcsicmp(f.c_str(), g_xlsxPath.c_str()) == 0) g_xlsxPath.clear();
+                } else {
+                    ++failed;
+                }
+            }
+            // 삭제된 파일이 현재 세션 것이면 리포트 버튼 비활성화
+            if (g_htmlPath.empty())  EnableWindow(hHtmlBtn,  FALSE);
+            if (g_xlsxPath.empty())  EnableWindow(hExcelBtn, FALSE);
+
+            std::wstring result = std::to_wstring(deleted) + L"개 삭제 완료";
+            if (failed > 0) result += L", " + std::to_wstring(failed) + L"개 실패 (사용 중인 파일)";
+            MessageBoxW(hwnd, result.c_str(), L"파일 삭제", MB_OK | MB_ICONINFORMATION);
         }
         else if (id == IDC_KEYWORD_FILE_BTN) {
             // 키워드 텍스트 파일 선택 (보안: 사용자가 명시적으로 파일 선택)
