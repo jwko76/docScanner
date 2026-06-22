@@ -172,9 +172,13 @@ bool EverythingScanner::loadFunctions() {
 // ============================================================
 
 static std::wstring sysGetEnvW(const wchar_t* name) {
-    wchar_t buf[MAX_PATH] = {};
-    DWORD len = GetEnvironmentVariableW(name, buf, MAX_PATH);
-    return (len > 0 && len < MAX_PATH) ? std::wstring(buf) : L"";
+    // Two-call 패턴: 버퍼 부족 시 필요 크기 재조회 (MAX_PATH 초과 경로 대응)
+    DWORD len = GetEnvironmentVariableW(name, nullptr, 0);
+    if (len == 0) return L"";
+    std::vector<wchar_t> buf(len);
+    DWORD len2 = GetEnvironmentVariableW(name, buf.data(), len);
+    if (len2 == 0 || len2 >= len) return L"";
+    return std::wstring(buf.data(), len2);
 }
 
 static std::vector<std::wstring> buildSystemExcludePaths() {
@@ -200,8 +204,7 @@ static std::vector<std::wstring> buildSystemExcludePaths() {
 
     // 드라이브별 고정 이름 제외 폴더 (모든 마운트된 드라이브에 적용)
     static const wchar_t* const k_names[] = {
-        L"$Recycle.Bin",
-        L"$RECYCLE.BIN",
+        L"$Recycle.Bin",   // 대소문자 무시 비교 → $RECYCLE.BIN 포함
         L"System Volume Information",
         L"Recovery",
         L"MSOCache",
