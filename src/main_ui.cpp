@@ -62,6 +62,7 @@
 #define IDC_KEYWORD_FILE_BTN    120   // 키워드 파일 불러오기 버튼
 #define IDC_LOAD_COMBO          121   // CPU 부하 수준 (낮음/중간/높음)
 #define IDC_FILE_GRID           122   // 키워드 매칭 파일 목록 그리드
+#define IDC_CLEAR_RESULT_BTN    123   // 결과 초기화 (UI + 출력 파일 삭제)
 
 // 우클릭 컨텍스트 메뉴 ID
 #define IDM_OPEN_FILE   201
@@ -677,7 +678,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     static HWND hStatus;
     static HWND hLogEdit;
     static HWND hTab, hGrid, hFileGrid;
-    static HWND hHtmlBtn,  hExcelBtn;
+    static HWND hHtmlBtn,  hExcelBtn, hClearBtn;
     static HWND hFilterCombo;
     static HWND hKeywordEdit, hKeywordFileBtn;
 
@@ -863,9 +864,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         y += tabH + 8;
 
-        // 행8: 리포트 열기 버튼
-        hHtmlBtn  = mkBtn(IDC_OPEN_HTML_BTN,  L"HTML 리포트 열기",  M,       y, 160, 28);
-        hExcelBtn = mkBtn(IDC_OPEN_EXCEL_BTN, L"Excel 리포트 열기", M+168,   y, 160, 28);
+        // 행8: 리포트 열기 버튼 + 결과 삭제 버튼
+        hHtmlBtn  = mkBtn(IDC_OPEN_HTML_BTN,     L"HTML 리포트 열기",  M,       y, 160, 28);
+        hExcelBtn = mkBtn(IDC_OPEN_EXCEL_BTN,    L"Excel 리포트 열기", M+168,   y, 160, 28);
+        hClearBtn = mkBtn(IDC_CLEAR_RESULT_BTN,  L"결과 초기화",       M+336,   y, 110, 28);
         EnableWindow(hHtmlBtn,  FALSE);
         EnableWindow(hExcelBtn, FALSE);
 
@@ -959,6 +961,64 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
         else if (id == IDC_OPEN_EXCEL_BTN && !g_xlsxPath.empty()) {
             ShellExecuteW(hwnd, L"open", g_xlsxPath.c_str(), nullptr, nullptr, SW_SHOW);
+        }
+        else if (id == IDC_CLEAR_RESULT_BTN) {
+            // 스캔 중 클릭 시 무시
+            if (g_running.load()) break;
+
+            // 삭제할 파일 목록 구성 (확인 메시지용)
+            std::wstring fileList;
+            if (!g_htmlPath.empty())  fileList += L"\n  • " + g_htmlPath;
+            if (!g_xlsxPath.empty())  fileList += L"\n  • " + g_xlsxPath;
+
+            std::wstring msg = L"화면의 스캔 결과를 지우고";
+            if (!fileList.empty())
+                msg += L" 아래 리포트 파일을 삭제합니다:" + fileList + L"\n\n계속하시겠습니까?";
+            else
+                msg += L" 로그·그리드를 초기화합니다.\n\n계속하시겠습니까?";
+
+            if (MessageBoxW(hwnd, msg.c_str(), L"결과 초기화",
+                            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES)
+                break;
+
+            // ── 출력 파일 삭제 ──
+            auto safeDelete = [](const std::wstring& path) {
+                if (path.empty()) return;
+                SetFileAttributesW(path.c_str(), FILE_ATTRIBUTE_NORMAL);
+                DeleteFileW(path.c_str());
+            };
+            safeDelete(g_htmlPath);
+            safeDelete(g_xlsxPath);
+            g_htmlPath.clear();
+            g_xlsxPath.clear();
+
+            // ── UI 초기화 ──
+            SetWindowTextW(hLogEdit, L"");
+            SendMessageW(hProgress, PBM_SETPOS, 0, 0);
+            SetWindowTextW(hStatus, L"결과가 초기화되었습니다.");
+
+            ListView_DeleteAllItems(hGrid);
+            g_gridPaths.clear();
+            g_allItems.clear();
+            ListView_DeleteAllItems(hFileGrid);
+            g_allFileItems.clear();
+            g_firstResult = false;
+            g_done.store(0); g_total.store(0); g_piiFound.store(0);
+            g_sortCol = -1; g_sortDir = 0;
+            SetGridSortArrow(-1, 0);
+            g_filterType.clear();
+            if (hFilterCombo) {
+                while (ComboBox_GetCount(hFilterCombo) > 1)
+                    ComboBox_DeleteString(hFilterCombo, 1);
+                ComboBox_SetCurSel(hFilterCombo, 0);
+            }
+            TabCtrl_SetCurSel(hTab, 0);
+            ShowWindow(hLogEdit,  SW_SHOW);
+            ShowWindow(hFileGrid, SW_HIDE);
+            ShowWindow(hGrid,     SW_HIDE);
+
+            EnableWindow(hHtmlBtn,  FALSE);
+            EnableWindow(hExcelBtn, FALSE);
         }
         else if (id == IDC_KEYWORD_FILE_BTN) {
             // 키워드 텍스트 파일 선택 (보안: 사용자가 명시적으로 파일 선택)
