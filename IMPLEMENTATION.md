@@ -32,6 +32,10 @@ CLI (main.cpp)
 `std::thread` 풀로 병렬 처리. 각 스레드는 독립된 `TextExtractor`/`PiiDetector`  
 인스턴스를 소유 (instance-level thread safety). 결과 수집은 `std::mutex`로 보호.
 
+**부하 수준 (GUI)**: `ScanConfig.loadLevel` (0=낮음/1=중간/2=높음) 에 따라  
+스레드 수(코어의 25%/50%/100%)와 `SetThreadPriority()`를 동시에 조정.  
+기본값은 중간(~50%)으로 백그라운드 작업에 영향을 최소화.
+
 ---
 
 ## 2. 모듈 API 레퍼런스
@@ -422,6 +426,7 @@ if (pd.doValidate && pd.type == PiiType::MY_NEW_TYPE) {
 |----------|------|
 | 새 PII 유형 추가 | `PiiType` 열거형 + `initPatterns()` + `getTypeName()` |
 | 새 파일 형식 지원 | `TextExtractor::extract()` 분기 추가 |
+| 임시 폴더 정리 | `DeleteDirectoryRecursive()` (Win32) — `_wsystem`/`cmd.exe` 미사용 |
 | 쿼리 폴백 스캐너 | `EverythingScanner` 실패 시 `FindFirstFileW` 기반 폴백 |
 | JSON 출력 | `Reporter::saveJson()` 추가 |
 | 증분 스캔 | Everything `date_modified:>2026-01-01` 필터 활용 |

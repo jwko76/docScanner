@@ -121,3 +121,6 @@
 - [x] 단위 테스트 28/28 통과 (여권번호 패턴 버그 수정 포함)
 - [x] GitHub 형상관리 설정 (.gitignore / README.md / LICENSE / git_setup.bat)
 - [x] 보안 설계 강화: 시스템 폴더 제외, 사용자 폴더 기본 스캔, 레지스트리/네트워크 미접근 코드 검증
+- [x] **GUI 부하 수준 옵션** (세션 10): 낮음/중간(기본)/높음 ComboBox — 스레드 수 + 우선순위 자동 조정
+- [x] **실시간 그리드 표출** (세션 10): 첫 탐지 결과 발생 시 "스캔 결과" 탭 자동 전환
+- [x] **CMD 팝업 제거** (세션 10): OOXML 임시폴더 정리 `_wsystem` → `DeleteDirectoryRecursive` Win32 구현

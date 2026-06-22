@@ -2,6 +2,64 @@
 
 ---
 
+## 2026-06-22 (세션 10 -- 부하 옵션 · 실시간 그리드 · CMD 팝업 제거)
+
+### 작업 1: CPU 부하 수준 선택 기능 (낮음/중간/높음)
+
+**변경 파일**: `src/main_ui.cpp`
+
+**동기**: 스캔 실행 시 CPU를 100% 사용해 동시 작업이 어려움.
+
+**구현**:
+- `IDC_LOAD_COMBO` ComboBox (낮음/중간/높음, 기본: 중간)로 `IDC_THREADS_EDIT` 대체
+- `ScanConfig.loadLevel` (0/1/2) 필드 추가
+- `ScanThread` 내 스레드 수·우선순위 분기:
+
+| 수준 | 스레드 수 | `SetThreadPriority` |
+|------|----------|---------------------|
+| 낮음 | 코어의 25% (최소 1) | `THREAD_PRIORITY_BELOW_NORMAL` |
+| 중간 | 코어의 50% (최소 1) | `THREAD_PRIORITY_BELOW_NORMAL` |
+| 높음 | 코어 100% | `THREAD_PRIORITY_NORMAL` |
+
+- 스캔 로그에 `(스레드 N개 / M코어, 부하: 중간)` 형태 표시
+
+---
+
+### 작업 2: 실시간 그리드 표출 (스캔 중 자동 탭 전환)
+
+**변경 파일**: `src/main_ui.cpp`
+
+**동기**: 스캔 결과가 그리드에 실시간으로 쌓이지만, 완료 전까지 로그 탭이 고정되어 확인 불가.
+
+**구현**:
+- `g_firstResult` 전역 플래그 추가
+- `WM_SCAN_RESULT` 핸들러: 첫 탐지 결과 도착 시 자동으로 "스캔 결과" 탭 전환
+- 스캔 시작 시 `g_firstResult = false` 리셋
+
+---
+
+### 작업 3: OOXML 처리 시 CMD 창 팝업 제거
+
+**변경 파일**: `src/text_extractor.cpp`
+
+**원인**: `extractOoxml()` 내 임시 폴더 정리 코드가 `_wsystem("rd /s /q ...")` 사용
+→ 내부적으로 `cmd.exe`를 생성하여 CMD 창이 순간 팝업, 포커스가 이동해 동시 작업 방해.
+
+**수정**:
+- `DeleteDirectoryRecursive()` Win32 순수 구현 추가:
+  `FindFirstFileW` → `DeleteFileW` / 재귀 호출 → `RemoveDirectoryW`
+- `_wsystem()` 호출 2곳 모두 `DeleteDirectoryRecursive(tmpFolder)` 로 교체
+- `cmd.exe` 프로세스 미생성 → 포커스 이동 없음
+
+**비고**: PowerShell `Expand-Archive` 압축 해제는 기존부터 `CREATE_NO_WINDOW` 적용 중 (정상).
+
+---
+
+**커밋**: `371e06c`  
+**빌드**: 전체 재컴파일 성공 (경고 없음), 서명 유효
+
+---
+
 ## 2026-06-21 (세션 9 -- 포터블 패키지 + OCR 검증 + 사용자 문서)
 
 ### 작업 1: 포터블 패키지 구성 (`dist/` 폴더)
