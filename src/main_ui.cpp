@@ -97,10 +97,11 @@ struct ScanResultItem {
 // 키워드 파일 목록 아이템 (Step 2 완료 후 UI 전달용)
 // ============================================================
 struct FileListItem {
-    std::wstring filePath;     // 전체 경로
-    std::wstring fileName;     // 파일명만
-    std::wstring extension;    // 확장자
-    LONGLONG     fileSize = 0; // 바이트
+    std::wstring filePath;        // 전체 경로
+    std::wstring fileName;        // 파일명만
+    std::wstring extension;       // 확장자
+    LONGLONG     fileSize = 0;    // 바이트
+    std::wstring matchedKeywords; // 매칭된 키워드 목록 (표시용)
 };
 
 // ============================================================
@@ -323,6 +324,27 @@ static bool MatchesKeywordFilter(const std::wstring& filePath, const KeywordFilt
     return true;
 }
 
+// 파일 경로에서 매칭된 키워드 목록을 문자열로 반환
+// 형식: "+필수" 는 '+' 접두, OR항은 그대로, NOT항은 '-' 접두
+static std::wstring GetMatchedKeywords(const std::wstring& filePath, const KeywordFilter& kf) {
+    if (kf.empty()) return L"";
+    std::wstring lPath = ToLowerW(filePath);
+    std::wstring result;
+    auto append = [&](const std::wstring& kw) {
+        if (!result.empty()) result += L", ";
+        result += kw;
+    };
+    // AND항: 반드시 일치하는 것만
+    for (const auto& t : kf.andTerms)
+        if (lPath.find(ToLowerW(t)) != std::wstring::npos)
+            append(L"+" + t);
+    // OR항: 일치하는 것만
+    for (const auto& t : kf.orTerms)
+        if (lPath.find(ToLowerW(t)) != std::wstring::npos)
+            append(t);
+    return result.empty() ? L"(경로 일치)" : result;
+}
+
 // ============================================================
 // 백그라운드 스캔 스레드
 // ============================================================
@@ -373,11 +395,12 @@ static void ScanThread(HWND hwnd, ScanConfig cfg) {
             flist->reserve(files.size());
             for (const auto& f : files) {
                 FileListItem fi;
-                fi.filePath  = f.fullPath;
-                auto sl = f.fullPath.find_last_of(L"\\/");
-                fi.fileName  = (sl != std::wstring::npos) ? f.fullPath.substr(sl + 1) : f.fullPath;
-                fi.extension = f.extension;
-                fi.fileSize  = f.fileSize;
+                fi.filePath        = f.fullPath;
+                auto sl            = f.fullPath.find_last_of(L"\\/");
+                fi.fileName        = (sl != std::wstring::npos) ? f.fullPath.substr(sl + 1) : f.fullPath;
+                fi.extension       = f.extension;
+                fi.fileSize        = f.fileSize;
+                fi.matchedKeywords = GetMatchedKeywords(f.fullPath, cfg.keywordFilter);
                 flist->push_back(std::move(fi));
             }
             PostMessageW(hwnd, WM_SCAN_FILELIST, (WPARAM)flist, 0);
@@ -557,7 +580,7 @@ static const int M  = 12;    // 마진
 // 개인정보 탐지 그리드 컬럼
 enum GridCol { GC_FILE=0, GC_TYPE, GC_VALUE, GC_MASKED, GC_LINE, GC_CONTEXT, GC_COUNT };
 // 키워드 파일 목록 그리드 컬럼
-enum FileGridCol { GFC_FILE=0, GFC_EXT, GFC_SIZE, GFC_PATH, GFC_FCOUNT };
+enum FileGridCol { GFC_FILE=0, GFC_EXT, GFC_SIZE, GFC_KEYWORD, GFC_PATH, GFC_FCOUNT };
 
 // ============================================================
 // 그리드 정렬 / 필터 헬퍼
@@ -876,10 +899,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 lvc2.iSubItem = sub; lvc2.pszText = hdr; lvc2.cx = w;
                 ListView_InsertColumn(hFileGrid, sub, &lvc2);
             };
-            addFCol(GFC_FILE, const_cast<LPWSTR>(L"파일명"),    200);
-            addFCol(GFC_EXT,  const_cast<LPWSTR>(L"확장자"),     60);
-            addFCol(GFC_SIZE, const_cast<LPWSTR>(L"크기(KB)"),   80);
-            addFCol(GFC_PATH, const_cast<LPWSTR>(L"전체 경로"), cw-350);
+            addFCol(GFC_FILE,    const_cast<LPWSTR>(L"파일명"),      180);
+            addFCol(GFC_EXT,     const_cast<LPWSTR>(L"확장자"),       55);
+            addFCol(GFC_SIZE,    const_cast<LPWSTR>(L"크기(KB)"),     70);
+            addFCol(GFC_KEYWORD, const_cast<LPWSTR>(L"매칭 키워드"), 160);
+            addFCol(GFC_PATH,    const_cast<LPWSTR>(L"전체 경로"),  cw-475);
         }
 
         // 탭2: 개인정보 탐지 결과 그리드 (초기 숨김)
@@ -1209,6 +1233,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             ShowWindow(hFileGrid, SW_HIDE);
             ShowWindow(hGrid,     SW_SHOW);
         }
+        // 스캔 완료 후 필터/정렬 상태 기준으로 그리드 재구성
+        // (스캔 중 필터 활성 시 라이브 그리드가 부분적일 수 있으므로 항상 재구성)
+        RebuildGrid();
         return 0;
     }
 
@@ -1227,10 +1254,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             LVITEMW lvi = {}; lvi.mask = LVIF_TEXT; lvi.iItem = row; lvi.iSubItem = 0;
             lvi.pszText = const_cast<LPWSTR>(fi.fileName.c_str());
             ListView_InsertItem(hFileGrid, &lvi);
-            ListView_SetItemText(hFileGrid, row, GFC_EXT,  const_cast<LPWSTR>(fi.extension.c_str()));
+            ListView_SetItemText(hFileGrid, row, GFC_EXT,     const_cast<LPWSTR>(fi.extension.c_str()));
             std::wstring sz = std::to_wstring(fi.fileSize / 1024) + L" KB";
-            ListView_SetItemText(hFileGrid, row, GFC_SIZE, const_cast<LPWSTR>(sz.c_str()));
-            ListView_SetItemText(hFileGrid, row, GFC_PATH, const_cast<LPWSTR>(fi.filePath.c_str()));
+            ListView_SetItemText(hFileGrid, row, GFC_SIZE,    const_cast<LPWSTR>(sz.c_str()));
+            ListView_SetItemText(hFileGrid, row, GFC_KEYWORD, const_cast<LPWSTR>(fi.matchedKeywords.c_str()));
+            ListView_SetItemText(hFileGrid, row, GFC_PATH,    const_cast<LPWSTR>(fi.filePath.c_str()));
         }
         SendMessageW(hFileGrid, WM_SETREDRAW, TRUE, 0);
         InvalidateRect(hFileGrid, nullptr, TRUE);
@@ -1252,6 +1280,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         g_allItems.push_back(*ri);
 
         // ── 파일 단위 그리드 표시 (파일 하나 = 행 하나) ──
+        // 필터 활성 중: 일치하는 유형만 그리드에 반영 (g_allItems는 항상 전체 저장)
+        const bool filterActive  = !g_filterType.empty();
+        const bool typeMatches   = !filterActive || (ri->typeName == g_filterType);
+
         auto aggrIt = g_fileAggr.find(ri->filePath);
         if (aggrIt != g_fileAggr.end()) {
             // 이미 행 있음 → 카운트/유형 업데이트
@@ -1261,11 +1293,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             for (const auto& t : aggr.types)
                 if (t == ri->typeName) { typeNew = false; break; }
             if (typeNew) aggr.types.push_back(ri->typeName);
-            std::wstring typeStr = MakeTypeStr(aggr.types, aggr.count);
-            ListView_SetItemText(hGrid, aggr.row, GC_TYPE,
-                const_cast<LPWSTR>(typeStr.c_str()));
-        } else {
-            // 새 파일 → 행 삽입
+
+            // 필터 없음 → 항상 표시 갱신 / 필터 있음 → 해당 유형일 때만 갱신
+            if (!filterActive) {
+                std::wstring typeStr = MakeTypeStr(aggr.types, aggr.count);
+                ListView_SetItemText(hGrid, aggr.row, GC_TYPE,
+                    const_cast<LPWSTR>(typeStr.c_str()));
+            }
+            // 필터 활성 중에는 RebuildGrid가 최종 조정 (WM_SCAN_COMPLETE 시 호출)
+        } else if (typeMatches) {
+            // 새 파일 → 행 삽입 (필터 없거나 유형 일치 시만)
             int topIdx  = ListView_GetTopIndex(hGrid);
             int perPage = ListView_GetCountPerPage(hGrid);
             int row = ListView_GetItemCount(hGrid);
@@ -1291,6 +1328,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
             if (atBottom) ListView_EnsureVisible(hGrid, row, FALSE);
         }
+        // filterActive && !typeMatches → g_allItems에만 저장, 그리드 무시
 
         // 첫 탐지 결과 도착 → 로그 탭에서만 자동으로 개인정보 탐지 탭(2)으로 전환
         // (키워드 파일 탭(1)을 보고 있으면 유지 — 사용자가 파일 목록 확인 중)
