@@ -32,6 +32,7 @@
 #include <algorithm>
 #include <sstream>
 #include <ctime>
+#include <unordered_map>
 
 #include "everything_scanner.h"
 #include "text_extractor.h"
@@ -128,6 +129,10 @@ static std::wstring      g_xlsxPath;
 static std::vector<std::wstring> g_gridPaths;
 // 전체 스캔 결과 사본 (정렬/필터 재구성용)
 static std::vector<ScanResultItem> g_allItems;
+// 파일 단위 집계 (filePath → {row, 탐지건수, 유형목록})
+// 그리드에 파일 하나당 행 하나만 표시하기 위해 사용
+struct FileAggr { int row; int count; std::vector<std::wstring> types; };
+static std::unordered_map<std::wstring, FileAggr> g_fileAggr;
 // 그리드 정렬: sortCol -1=없음, sortDir 0=없음 1=오름차 -1=내림차
 static int          g_sortCol = -1;
 static int          g_sortDir = 0;
@@ -608,58 +613,92 @@ static void SetGridSortArrow(int sortCol, int sortDir) {
     }
 }
 
-// 현재 필터 + 정렬 상태로 그리드 전체 재구성
+// 유형 목록 + 건수 → 표시 문자열 ("주민등록번호, 전화번호 (5건)")
+static std::wstring MakeTypeStr(const std::vector<std::wstring>& types, int count) {
+    std::wstring s;
+    for (size_t i = 0; i < types.size(); ++i) {
+        if (i > 0) s += L", ";
+        s += types[i];
+    }
+    s += L" (" + std::to_wstring(count) + L"건)";
+    return s;
+}
+
+// 현재 필터 + 정렬 상태로 그리드 전체 재구성 (파일 단위 — 파일 하나 = 행 하나)
 static void RebuildGrid() {
     if (!g_hGrid) return;
 
-    // 1. 필터 적용
-    std::vector<size_t> idxs;
-    idxs.reserve(g_allItems.size());
+    // 1. 필터 적용 후 파일 단위 그룹화 (첫 등장 순서 유지)
+    struct FileGroup {
+        std::vector<size_t> indices;  // g_allItems 인덱스 (필터 통과한 것만)
+    };
+    std::vector<std::wstring> fileOrder;
+    std::unordered_map<std::wstring, FileGroup> fileMap;
+
     for (size_t i = 0; i < g_allItems.size(); i++) {
-        if (g_filterType.empty() || g_allItems[i].typeName == g_filterType)
-            idxs.push_back(i);
+        const auto& item = g_allItems[i];
+        if (!g_filterType.empty() && item.typeName != g_filterType) continue;
+        if (fileMap.find(item.filePath) == fileMap.end()) {
+            fileOrder.push_back(item.filePath);
+        }
+        fileMap[item.filePath].indices.push_back(i);
     }
 
-    // 2. 정렬
+    // 2. 파일 그룹 정렬 (대표값 = 그룹 첫 아이템 기준)
     if (g_sortCol >= 0 && g_sortDir != 0) {
-        bool numCol = (g_sortCol == GC_LINE);
-        std::stable_sort(idxs.begin(), idxs.end(), [&](size_t a, size_t b) {
-            std::wstring va = GetItemField(g_allItems[a], g_sortCol);
-            std::wstring vb = GetItemField(g_allItems[b], g_sortCol);
-            int cmp;
-            if (numCol) {
-                int ia = _wtoi(va.c_str()), ib = _wtoi(vb.c_str());
-                cmp = (ia < ib) ? -1 : (ia > ib) ? 1 : 0;
-            } else {
-                cmp = _wcsicmp(va.c_str(), vb.c_str());
-            }
-            return g_sortDir == 1 ? cmp < 0 : cmp > 0;
-        });
+        std::stable_sort(fileOrder.begin(), fileOrder.end(),
+            [&](const std::wstring& pa, const std::wstring& pb) {
+                const ScanResultItem& ra = g_allItems[fileMap[pa].indices[0]];
+                const ScanResultItem& rb = g_allItems[fileMap[pb].indices[0]];
+                std::wstring va = GetItemField(ra, g_sortCol);
+                std::wstring vb = GetItemField(rb, g_sortCol);
+                int cmp;
+                if (g_sortCol == GC_LINE) {
+                    cmp = _wtoi(va.c_str()) - _wtoi(vb.c_str());
+                } else {
+                    cmp = _wcsicmp(va.c_str(), vb.c_str());
+                }
+                return g_sortDir == 1 ? cmp < 0 : cmp > 0;
+            });
     }
 
-    // 3. ListView 재구성 (WM_SETREDRAW로 깜박임 방지)
+    // 3. ListView 재구성
     SendMessageW(g_hGrid, WM_SETREDRAW, FALSE, 0);
     ListView_DeleteAllItems(g_hGrid);
     g_gridPaths.clear();
+    g_fileAggr.clear();
 
-    for (size_t idx : idxs) {
-        const ScanResultItem& ri = g_allItems[idx];
+    for (const auto& fp : fileOrder) {
+        const FileGroup& grp = fileMap[fp];
+        if (grp.indices.empty()) continue;
+        const ScanResultItem& first = g_allItems[grp.indices[0]];
+
+        // 유형 중복 제거 (등장 순)
+        std::vector<std::wstring> types;
+        for (size_t idx : grp.indices) {
+            const std::wstring& t = g_allItems[idx].typeName;
+            bool dup = false;
+            for (const auto& ex : types) if (ex == t) { dup = true; break; }
+            if (!dup) types.push_back(t);
+        }
+        std::wstring typeStr = MakeTypeStr(types, (int)grp.indices.size());
+
         int row = ListView_GetItemCount(g_hGrid);
-        g_gridPaths.push_back(ri.filePath);
+        g_gridPaths.push_back(fp);
 
-        LVITEMW lvi = {};
-        lvi.mask     = LVIF_TEXT;
-        lvi.iItem    = row;
-        lvi.iSubItem = GC_FILE;
-        lvi.pszText  = const_cast<LPWSTR>(ri.fileName.c_str());
+        FileAggr aggr; aggr.row = row; aggr.count = (int)grp.indices.size(); aggr.types = types;
+        g_fileAggr[fp] = aggr;
+
+        LVITEMW lvi = {}; lvi.mask = LVIF_TEXT; lvi.iItem = row; lvi.iSubItem = GC_FILE;
+        lvi.pszText = const_cast<LPWSTR>(first.fileName.c_str());
         ListView_InsertItem(g_hGrid, &lvi);
 
-        std::wstring lineStr = std::to_wstring(ri.lineNumber);
-        ListView_SetItemText(g_hGrid, row, GC_TYPE,    const_cast<LPWSTR>(ri.typeName.c_str()));
-        ListView_SetItemText(g_hGrid, row, GC_VALUE,   const_cast<LPWSTR>(ri.matchedText.c_str()));
-        ListView_SetItemText(g_hGrid, row, GC_MASKED,  const_cast<LPWSTR>(ri.maskedText.c_str()));
+        std::wstring lineStr = std::to_wstring(first.lineNumber);
+        ListView_SetItemText(g_hGrid, row, GC_TYPE,    const_cast<LPWSTR>(typeStr.c_str()));
+        ListView_SetItemText(g_hGrid, row, GC_VALUE,   const_cast<LPWSTR>(first.matchedText.c_str()));
+        ListView_SetItemText(g_hGrid, row, GC_MASKED,  const_cast<LPWSTR>(first.maskedText.c_str()));
         ListView_SetItemText(g_hGrid, row, GC_LINE,    const_cast<LPWSTR>(lineStr.c_str()));
-        ListView_SetItemText(g_hGrid, row, GC_CONTEXT, const_cast<LPWSTR>(ri.context.c_str()));
+        ListView_SetItemText(g_hGrid, row, GC_CONTEXT, const_cast<LPWSTR>(first.context.c_str()));
     }
 
     SendMessageW(g_hGrid, WM_SETREDRAW, TRUE, 0);
@@ -922,6 +961,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             ListView_DeleteAllItems(hGrid);
             g_gridPaths.clear();
             g_allItems.clear();
+            g_fileAggr.clear();
             ListView_DeleteAllItems(hFileGrid);
             g_allFileItems.clear();
             g_firstResult = false;
@@ -1002,6 +1042,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             ListView_DeleteAllItems(hGrid);
             g_gridPaths.clear();
             g_allItems.clear();
+            g_fileAggr.clear();
             ListView_DeleteAllItems(hFileGrid);
             g_allFileItems.clear();
             g_firstResult = false;
@@ -1207,38 +1248,49 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         auto* ri = reinterpret_cast<ScanResultItem*>(wParam);
         if (!ri) return 0;
 
-        int row = ListView_GetItemCount(hGrid);
-        g_gridPaths.push_back(ri->filePath);
-
-        // 삽입 전: 사용자가 이미 맨 아래를 보고 있는지 확인
-        // → 스크롤 올려 중간을 보고 있으면 자동 스크롤 생략 (스크롤 위치 고정)
-        int topIdx   = ListView_GetTopIndex(hGrid);
-        int perPage  = ListView_GetCountPerPage(hGrid);
-        bool atBottom = (row == 0) || (topIdx + perPage >= row);
-
-        // 행 삽입
-        LVITEMW lvi = {};
-        lvi.mask    = LVIF_TEXT;
-        lvi.iItem   = row;
-        lvi.iSubItem = GC_FILE;
-        lvi.pszText = const_cast<LPWSTR>(ri->fileName.c_str());
-        ListView_InsertItem(hGrid, &lvi);
-
-        // 서브아이템 채우기
-        auto setSub = [&](int col, const std::wstring& txt) {
-            ListView_SetItemText(hGrid, row, col, const_cast<LPWSTR>(txt.c_str()));
-        };
-        setSub(GC_TYPE,    ri->typeName);
-        setSub(GC_VALUE,   ri->matchedText);
-        setSub(GC_MASKED,  ri->maskedText);
-        setSub(GC_LINE,    std::to_wstring(ri->lineNumber));
-        setSub(GC_CONTEXT, ri->context);
-
-        // 맨 아래에 있을 때만 자동 스크롤 (사용자가 스크롤 올렸으면 위치 유지)
-        if (atBottom) ListView_EnsureVisible(hGrid, row, FALSE);
-
         // 전체 결과 사본 저장 (정렬/필터 재구성용)
         g_allItems.push_back(*ri);
+
+        // ── 파일 단위 그리드 표시 (파일 하나 = 행 하나) ──
+        auto aggrIt = g_fileAggr.find(ri->filePath);
+        if (aggrIt != g_fileAggr.end()) {
+            // 이미 행 있음 → 카운트/유형 업데이트
+            FileAggr& aggr = aggrIt->second;
+            ++aggr.count;
+            bool typeNew = true;
+            for (const auto& t : aggr.types)
+                if (t == ri->typeName) { typeNew = false; break; }
+            if (typeNew) aggr.types.push_back(ri->typeName);
+            std::wstring typeStr = MakeTypeStr(aggr.types, aggr.count);
+            ListView_SetItemText(hGrid, aggr.row, GC_TYPE,
+                const_cast<LPWSTR>(typeStr.c_str()));
+        } else {
+            // 새 파일 → 행 삽입
+            int topIdx  = ListView_GetTopIndex(hGrid);
+            int perPage = ListView_GetCountPerPage(hGrid);
+            int row = ListView_GetItemCount(hGrid);
+            bool atBottom = (row == 0) || (topIdx + perPage >= row);
+
+            FileAggr aggr; aggr.row = row; aggr.count = 1;
+            aggr.types.push_back(ri->typeName);
+            g_fileAggr[ri->filePath] = aggr;
+            g_gridPaths.push_back(ri->filePath);
+
+            LVITEMW lvi = {}; lvi.mask = LVIF_TEXT; lvi.iItem = row;
+            lvi.iSubItem = GC_FILE;
+            lvi.pszText = const_cast<LPWSTR>(ri->fileName.c_str());
+            ListView_InsertItem(hGrid, &lvi);
+
+            std::wstring typeStr = MakeTypeStr(aggr.types, 1);
+            std::wstring lineStr = std::to_wstring(ri->lineNumber);
+            ListView_SetItemText(hGrid, row, GC_TYPE,    const_cast<LPWSTR>(typeStr.c_str()));
+            ListView_SetItemText(hGrid, row, GC_VALUE,   const_cast<LPWSTR>(ri->matchedText.c_str()));
+            ListView_SetItemText(hGrid, row, GC_MASKED,  const_cast<LPWSTR>(ri->maskedText.c_str()));
+            ListView_SetItemText(hGrid, row, GC_LINE,    const_cast<LPWSTR>(lineStr.c_str()));
+            ListView_SetItemText(hGrid, row, GC_CONTEXT, const_cast<LPWSTR>(ri->context.c_str()));
+
+            if (atBottom) ListView_EnsureVisible(hGrid, row, FALSE);
+        }
 
         // 첫 탐지 결과 도착 → 로그 탭에서만 자동으로 개인정보 탐지 탭(2)으로 전환
         // (키워드 파일 탭(1)을 보고 있으면 유지 — 사용자가 파일 목록 확인 중)
