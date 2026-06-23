@@ -1210,6 +1210,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         int row = ListView_GetItemCount(hGrid);
         g_gridPaths.push_back(ri->filePath);
 
+        // 삽입 전: 사용자가 이미 맨 아래를 보고 있는지 확인
+        // → 스크롤 올려 중간을 보고 있으면 자동 스크롤 생략 (스크롤 위치 고정)
+        int topIdx   = ListView_GetTopIndex(hGrid);
+        int perPage  = ListView_GetCountPerPage(hGrid);
+        bool atBottom = (row == 0) || (topIdx + perPage >= row);
+
         // 행 삽입
         LVITEMW lvi = {};
         lvi.mask    = LVIF_TEXT;
@@ -1228,8 +1234,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         setSub(GC_LINE,    std::to_wstring(ri->lineNumber));
         setSub(GC_CONTEXT, ri->context);
 
-        // 맨 아래로 스크롤
-        ListView_EnsureVisible(hGrid, row, FALSE);
+        // 맨 아래에 있을 때만 자동 스크롤 (사용자가 스크롤 올렸으면 위치 유지)
+        if (atBottom) ListView_EnsureVisible(hGrid, row, FALSE);
 
         // 전체 결과 사본 저장 (정렬/필터 재구성용)
         g_allItems.push_back(*ri);
