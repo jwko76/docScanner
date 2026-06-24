@@ -1621,6 +1621,21 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         return 0;
     }
 
+    // ── 트리 체크박스 cascade (TVN_ITEMCHANGING + PostMessage 방식) ─────
+    case WM_APP + 20: {
+        // TVN_ITEMCHANGING에서 PostMessage한 후 여기서 처리
+        // wParam = HTREEITEM, lParam = new check state (1 or 2)
+        HTREEITEM hChanged = (HTREEITEM)wParam;
+        int       newSt    = (int)lParam;
+        if (!g_treeUpdating && hChanged && (newSt == 1 || newSt == 2)) {
+            g_treeUpdating = true;
+            SetChildrenState(hScanTree, hChanged, newSt);
+            UpdateParentState(hScanTree, hChanged);
+            g_treeUpdating = false;
+        }
+        return 0;
+    }
+
     // ── 사용자 정의 메시지 ────────────────────────────────────
     case WM_SCAN_LOG: {
         wchar_t* msg = reinterpret_cast<wchar_t*>(wParam);
@@ -1812,7 +1827,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     }
                 }
             }
-            // 보안 폴더 체크 차단: TVN_ITEMCHANGING에서 변경 전에 거부 (깜빡임 없음)
+            // 보안 폴더 체크 차단 + 체크 변경 후 자식/부모 업데이트 예약
             if (hdr->code == TVN_ITEMCHANGING) {
                 auto* p = reinterpret_cast<NMTVITEMCHANGE*>(lParam);
                 if ((p->uChanged & TVIF_STATE) && p->lParam) {
@@ -1820,26 +1835,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     int newChk = (p->uStateNew & TVIS_STATEIMAGEMASK) >> 12;
                     if (d->isProtected && newChk == 2) // 2=체크 시도 → 차단
                         return TRUE; // TRUE 반환 = 변경 거부
+                    // 사용자 클릭에 의한 체크/해제: 상태 반영 후 처리하도록 PostMessage
+                    // (TVN_ITEMCHANGED는 ComCtl32 v6 전용이라 PostMessage로 대체)
+                    if (!g_treeUpdating && (newChk == 1 || newChk == 2))
+                        PostMessageW(hwnd, WM_APP + 20,
+                            (WPARAM)p->hItem, (LPARAM)newChk);
                 }
             }
             if (hdr->code == TVN_DELETEITEM) {
                 auto* pnmtv = reinterpret_cast<NMTREEVIEWW*>(lParam);
                 if (pnmtv->itemOld.lParam)
                     delete reinterpret_cast<TreeItemData*>(pnmtv->itemOld.lParam);
-            }
-            // 체크 변경 후: 자식 전파 + 부모 3상태 업데이트
-            if (hdr->code == TVN_ITEMCHANGED && !g_treeUpdating) {
-                auto* p2 = reinterpret_cast<NMTVITEMCHANGE*>(lParam);
-                if (p2->uChanged & TVIF_STATE) {
-                    int newSt = (p2->uStateNew & TVIS_STATEIMAGEMASK) >> 12;
-                    int oldSt = (p2->uStateOld & TVIS_STATEIMAGEMASK) >> 12;
-                    if (newSt != oldSt && (newSt == 1 || newSt == 2)) {
-                        g_treeUpdating = true;
-                        SetChildrenState(hScanTree, p2->hItem, newSt);
-                        UpdateParentState(hScanTree, p2->hItem);
-                        g_treeUpdating = false;
-                    }
-                }
             }
         }
 
