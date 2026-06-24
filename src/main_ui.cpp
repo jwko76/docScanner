@@ -763,7 +763,7 @@ static const int W  = 960;   // 클라이언트 폭
 static const int M  = 12;    // 마진
 
 // 개인정보 탐지 그리드 컬럼
-enum GridCol { GC_FILE=0, GC_TYPE, GC_VALUE, GC_MASKED, GC_LINE, GC_CONTEXT, GC_COUNT };
+enum GridCol { GC_FILE=0, GC_TYPE, GC_VALUE, GC_CONTEXT, GC_PATH, GC_COUNT };
 // 키워드 파일 목록 그리드 컬럼
 enum FileGridCol { GFC_FILE=0, GFC_EXT, GFC_SIZE, GFC_KEYWORD, GFC_PATH, GFC_FCOUNT };
 
@@ -773,7 +773,7 @@ enum FileGridCol { GFC_FILE=0, GFC_EXT, GFC_SIZE, GFC_KEYWORD, GFC_PATH, GFC_FCO
 
 // 컬럼 기본 헤더 텍스트 (정렬 삼각형 추가 전 원본)
 static const wchar_t* const k_colHeaders[GC_COUNT] = {
-    L"파일명", L"탐지 유형", L"탐지 값", L"마스킹", L"줄", L"맥락"
+    L"파일명", L"탐지 유형", L"탐지 값", L"맥락", L"전체 경로"
 };
 
 static std::wstring GetItemField(const ScanResultItem& item, int col) {
@@ -781,9 +781,8 @@ static std::wstring GetItemField(const ScanResultItem& item, int col) {
     case GC_FILE:    return item.fileName;
     case GC_TYPE:    return item.typeName;
     case GC_VALUE:   return item.matchedText;
-    case GC_MASKED:  return item.maskedText;
-    case GC_LINE:    return std::to_wstring(item.lineNumber);
     case GC_CONTEXT: return item.context;
+    case GC_PATH:    return item.filePath;
     default:         return L"";
     }
 }
@@ -861,11 +860,7 @@ static void RebuildGrid() {
                 std::wstring va = GetItemField(ra, g_sortCol);
                 std::wstring vb = GetItemField(rb, g_sortCol);
                 int cmp;
-                if (g_sortCol == GC_LINE) {
-                    cmp = _wtoi(va.c_str()) - _wtoi(vb.c_str());
-                } else {
-                    cmp = _wcsicmp(va.c_str(), vb.c_str());
-                }
+                cmp = _wcsicmp(va.c_str(), vb.c_str());
                 return g_sortDir == 1 ? cmp < 0 : cmp > 0;
             });
     }
@@ -901,12 +896,10 @@ static void RebuildGrid() {
         lvi.pszText = const_cast<LPWSTR>(first.fileName.c_str());
         ListView_InsertItem(g_hGrid, &lvi);
 
-        std::wstring lineStr = std::to_wstring(first.lineNumber);
         ListView_SetItemText(g_hGrid, row, GC_TYPE,    const_cast<LPWSTR>(typeStr.c_str()));
         ListView_SetItemText(g_hGrid, row, GC_VALUE,   const_cast<LPWSTR>(first.matchedText.c_str()));
-        ListView_SetItemText(g_hGrid, row, GC_MASKED,  const_cast<LPWSTR>(first.maskedText.c_str()));
-        ListView_SetItemText(g_hGrid, row, GC_LINE,    const_cast<LPWSTR>(lineStr.c_str()));
         ListView_SetItemText(g_hGrid, row, GC_CONTEXT, const_cast<LPWSTR>(first.context.c_str()));
+        ListView_SetItemText(g_hGrid, row, GC_PATH,    const_cast<LPWSTR>(fp.c_str()));
     }
 
     SendMessageW(g_hGrid, WM_SETREDRAW, TRUE, 0);
@@ -1246,11 +1239,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             ListView_InsertColumn(hGrid, sub, &lvc);
         };
         addCol(GC_FILE,    const_cast<LPWSTR>(L"파일명"),   170);
-        addCol(GC_TYPE,    const_cast<LPWSTR>(L"탐지 유형"), 90);
-        addCol(GC_VALUE,   const_cast<LPWSTR>(L"탐지 값"),  130);
-        addCol(GC_MASKED,  const_cast<LPWSTR>(L"마스킹"),   120);
-        addCol(GC_LINE,    const_cast<LPWSTR>(L"줄"),        40);
-        addCol(GC_CONTEXT, const_cast<LPWSTR>(L"맥락"),     cw-560);
+        addCol(GC_TYPE,    const_cast<LPWSTR>(L"탐지 유형"),  90);
+        addCol(GC_VALUE,   const_cast<LPWSTR>(L"탐지 값"),  150);
+        addCol(GC_CONTEXT, const_cast<LPWSTR>(L"맥락"),     140);
+        addCol(GC_PATH,    const_cast<LPWSTR>(L"전체 경로"), cw-560);
 
         y += tabH + 8;
 
@@ -1665,12 +1657,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             ListView_InsertItem(hGrid, &lvi);
 
             std::wstring typeStr = MakeTypeStr(aggr.types, 1);
-            std::wstring lineStr = std::to_wstring(ri->lineNumber);
             ListView_SetItemText(hGrid, row, GC_TYPE,    const_cast<LPWSTR>(typeStr.c_str()));
             ListView_SetItemText(hGrid, row, GC_VALUE,   const_cast<LPWSTR>(ri->matchedText.c_str()));
-            ListView_SetItemText(hGrid, row, GC_MASKED,  const_cast<LPWSTR>(ri->maskedText.c_str()));
-            ListView_SetItemText(hGrid, row, GC_LINE,    const_cast<LPWSTR>(lineStr.c_str()));
             ListView_SetItemText(hGrid, row, GC_CONTEXT, const_cast<LPWSTR>(ri->context.c_str()));
+            ListView_SetItemText(hGrid, row, GC_PATH,    const_cast<LPWSTR>(ri->filePath.c_str()));
 
             if (atBottom) ListView_EnsureVisible(hGrid, row, FALSE);
         }
@@ -1772,13 +1762,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
         }
 
-        // 개인정보 탐지 탭 더블클릭 → 파일 열기 + 탐색기에서 폴더 열기
+        // 개인정보 탐지 탭 더블클릭 → 파일 열기
         if (hdr->hwndFrom == hGrid && hdr->code == NM_DBLCLK) {
             int sel = ListView_GetNextItem(hGrid, -1, LVNI_SELECTED);
             if (sel >= 0 && sel < (int)g_gridPaths.size()) {
-                const std::wstring& path = g_gridPaths[sel];
-                ShellExecuteW(hwnd, L"open", path.c_str(), nullptr, nullptr, SW_SHOW);
-                ExploreAndSelect(path);
+                ShellExecuteW(hwnd, L"open", g_gridPaths[sel].c_str(), nullptr, nullptr, SW_SHOW);
             }
         }
         return 0;
@@ -1804,25 +1792,20 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
             return 0;
         }
-        // 개인정보 탐지 탭 우클릭
+        // 개인정보 탐지 탭 우클릭 → 폴더 열기만
         if ((HWND)wParam != hGrid) break;
         int sel = ListView_GetNextItem(hGrid, -1, LVNI_SELECTED);
         if (sel < 0 || sel >= (int)g_gridPaths.size()) return 0;
 
         HMENU hMenu = CreatePopupMenu();
-        AppendMenuW(hMenu, MF_STRING, IDM_OPEN_FILE,   L"파일 열기(&O)");
         AppendMenuW(hMenu, MF_STRING, IDM_OPEN_FOLDER, L"폴더 열기(&F)");
 
         int cmd = (int)TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
             LOWORD(lParam), HIWORD(lParam), 0, hwnd, nullptr);
         DestroyMenu(hMenu);
 
-        const std::wstring& path = g_gridPaths[sel];
-        if (cmd == IDM_OPEN_FILE) {
-            ShellExecuteW(hwnd, L"open", path.c_str(), nullptr, nullptr, SW_SHOW);
-        } else if (cmd == IDM_OPEN_FOLDER) {
-            ExploreAndSelect(path);
-        }
+        if (cmd == IDM_OPEN_FOLDER)
+            ExploreAndSelect(g_gridPaths[sel]);
         return 0;
     }
 
