@@ -211,13 +211,21 @@ static void PostLog(HWND hwnd, const std::wstring& msg) {
 }
 
 // 탐색기에서 파일을 선택 상태로 열기
-// ShellExecute /select, 는 숨김 폴더·AppData 등에서 바탕화면을 표시하는 버그 존재
-// → SHOpenFolderAndSelectItems 사용 (Explorer 내부 API, 모든 경로 정상 처리)
+// 1차: SHParseDisplayName + SHOpenFolderAndSelectItems (숨김·AppData 포함 모든 경로)
+// 2차 폴백: 부모 폴더를 ShellExecuteW explore 로 열기
 static void ExploreAndSelect(const std::wstring& filePath) {
     PIDLIST_ABSOLUTE pidl = nullptr;
     if (SUCCEEDED(SHParseDisplayName(filePath.c_str(), nullptr, &pidl, 0, nullptr))) {
-        SHOpenFolderAndSelectItems(pidl, 0, nullptr, 0);
+        HRESULT hr = SHOpenFolderAndSelectItems(pidl, 0, nullptr, 0);
         CoTaskMemFree(pidl);
+        if (SUCCEEDED(hr)) return;
+    }
+    // 2차 폴백: 부모 폴더 열기
+    wchar_t folder[MAX_PATH] = {};
+    if (wcscpy_s(folder, MAX_PATH, filePath.c_str()) == 0) {
+        PathRemoveFileSpecW(folder);   // shlwapi.h, shlwapi.lib 이미 포함
+        if (*folder)
+            ShellExecuteW(nullptr, L"explore", folder, nullptr, nullptr, SW_SHOW);
     }
 }
 
