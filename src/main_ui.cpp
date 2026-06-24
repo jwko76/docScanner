@@ -67,6 +67,8 @@
 #define IDC_DELETE_OUTPUT_BTN   124   // 출력 폴더의 모든 xls/html 결과 파일 삭제
 #define IDC_SCAN_TREE           125   // 스캔 경로 트리뷰 (체크박스 다중 선택)
 #define IDC_KEYWORD_PATH_CHK    126   // 키워드를 경로 전체에서 검색 (기본: 파일명만)
+#define IDC_EXT_EXCL_EDIT       127   // 제외 확장자 직접 입력 (기본: xml log json)
+#define IDC_EXT_EXCL_BTN        128   // 제외 확장자 파일 불러오기
 
 // 우클릭 컨텍스트 메뉴 ID
 #define IDM_OPEN_FILE   201
@@ -215,11 +217,13 @@ static void PostLog(HWND hwnd, const std::wstring& msg) {
 struct ScanConfig {
     std::vector<std::wstring> scanPaths;           // 비어 있으면 전체 드라이브 스캔
     std::wstring outputDir;
-    bool         skipImages        = true;
-    int          loadLevel         = 1;            // 0=낮음(~25%), 1=중간(~50%), 2=높음(100%)
-    LONGLONG     maxFileSize       = 100LL * 1024 * 1024;
+    bool         skipImages             = true;
+    int          loadLevel              = 1;       // 0=낮음(~25%), 1=중간(~50%), 2=높음(100%)
+    LONGLONG     maxFileSize            = 100LL * 1024 * 1024;
     KeywordFilter keywordFilter;                   // 파일 이름/경로 키워드 필터
-    bool         keywordSearchPath = false;        // true=경로 전체, false=파일명만
+    bool         keywordSearchPath      = false;   // true=경로 전체, false=파일명만
+    std::vector<std::wstring> excludeExts;         // 제외 확장자 (소문자, 점 없이)
+    bool         excludeProtectedPaths  = true;    // Windows 핵심 보안 폴더 파일 제외 (EDR 충돌 방지)
 };
 
 // ============================================================
@@ -350,6 +354,100 @@ static std::wstring GetMatchedKeywords(const std::wstring& filePath, const Keywo
 }
 
 // ============================================================
+// 확장자 제외 헬퍼
+// ============================================================
+
+// 확장자 목록 파싱 (공백/콤마/세미콜론 구분, 점 자동 제거, 소문자 변환)
+static std::vector<std::wstring> ParseExtList(const std::wstring& text) {
+    std::vector<std::wstring> result;
+    std::wstring cur;
+    for (wchar_t c : text) {
+        if (c == L' ' || c == L',' || c == L';' || c == L'\t' || c == L'\n' || c == L'\r') {
+            if (!cur.empty()) {
+                if (cur[0] == L'.') cur = cur.substr(1);
+                if (!cur.empty()) {
+                    std::wstring lc = cur;
+                    CharLowerBuffW(&lc[0], (DWORD)lc.size());
+                    result.push_back(lc);
+                }
+                cur.clear();
+            }
+        } else {
+            cur += c;
+        }
+    }
+    if (!cur.empty()) {
+        if (cur[0] == L'.') cur = cur.substr(1);
+        if (!cur.empty()) {
+            std::wstring lc = cur;
+            CharLowerBuffW(&lc[0], (DWORD)lc.size());
+            result.push_back(lc);
+        }
+    }
+    return result;
+}
+
+// 확장자 목록 텍스트 파일에서 로드 (UTF-8/ANSI, 줄바꿈+공백 구분)
+static std::vector<std::wstring> LoadExtListFromFile(const std::wstring& filePath) {
+    if (filePath.empty() || filePath.size() > MAX_PATH) return {};
+    WIN32_FILE_ATTRIBUTE_DATA fad = {};
+    if (!GetFileAttributesExW(filePath.c_str(), GetFileExInfoStandard, &fad)) return {};
+    ULONGLONG fs = ((ULONGLONG)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+    if (fs == 0 || fs > 65536) return {};
+    HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) return {};
+    std::vector<char> buf((size_t)fs, 0);
+    DWORD read = 0;
+    bool ok = ReadFile(hFile, buf.data(), (DWORD)fs, &read, nullptr);
+    CloseHandle(hFile);
+    if (!ok || read == 0) return {};
+    for (auto& c : buf) if (c == '\0') c = ' ';
+    std::wstring content;
+    int wlen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, buf.data(), (int)read, nullptr, 0);
+    if (wlen > 0) {
+        content.resize(wlen);
+        MultiByteToWideChar(CP_UTF8, 0, buf.data(), (int)read, &content[0], wlen);
+    } else {
+        wlen = MultiByteToWideChar(CP_ACP, 0, buf.data(), (int)read, nullptr, 0);
+        if (wlen <= 0) return {};
+        content.resize(wlen);
+        MultiByteToWideChar(CP_ACP, 0, buf.data(), (int)read, &content[0], wlen);
+    }
+    return ParseExtList(content);
+}
+
+// ============================================================
+// Windows 보안 경로 판별 (ScanThread + 트리뷰 헬퍼 공유)
+// 파일 경로에도 적용 가능 (prefix 매칭 → 하위 파일 포함)
+// ============================================================
+static bool IsWindowsSecurityPath(const std::wstring& path) {
+    if (path.size() <= 3) return false; // 드라이브 루트는 보호 안 함
+    std::wstring rel = path.substr(3);
+    CharLowerBuffW(&rel[0], (DWORD)rel.size());
+    static const wchar_t* const k_sec[] = {
+        L"windows\\system32\\",
+        L"windows\\syswow64\\",
+        L"windows\\winsxs\\",
+        L"windows\\boot\\",
+        L"windows\\serviceprofiles\\",
+        L"windows\\csc\\",
+        L"program files\\windows defender\\",
+        L"program files\\windows defender advanced threat protection\\",
+        L"program files (x86)\\windows defender\\",
+        L"programdata\\microsoft\\windows defender\\",
+        L"programdata\\microsoft\\windows defender advanced threat protection\\",
+        nullptr
+    };
+    for (int i = 0; k_sec[i]; ++i) {
+        size_t slen = wcslen(k_sec[i]);
+        if (rel.size() >= slen && rel.compare(0, slen, k_sec[i]) == 0)
+            return true;
+    }
+    return false;
+}
+
+// ============================================================
 // 백그라운드 스캔 스레드
 // ============================================================
 static void ScanThread(HWND hwnd, ScanConfig cfg) {
@@ -404,6 +502,40 @@ static void ScanThread(HWND hwnd, ScanConfig cfg) {
     }
 
     if (!g_running) { PostLog(hwnd, L"[취소됨]"); PostMessageW(hwnd, WM_SCAN_COMPLETE, 0, 0); return; }
+
+    // ── 보안 폴더 파일 제외 (EDR 충돌 방지 이중 방어) ──────────
+    if (cfg.excludeProtectedPaths) {
+        size_t before = files.size();
+        files.erase(std::remove_if(files.begin(), files.end(),
+            [](const FileEntry& f) { return IsWindowsSecurityPath(f.fullPath); }),
+            files.end());
+        if (files.size() < before)
+            PostLog(hwnd, L"  ✓ 보안 폴더 파일 "
+                + std::to_wstring(before - files.size()) + L"개 제외 (EDR 충돌 방지)");
+    }
+
+    // ── 확장자 제외 필터 ────────────────────────────────────────
+    if (!cfg.excludeExts.empty()) {
+        size_t before = files.size();
+        files.erase(std::remove_if(files.begin(), files.end(),
+            [&](const FileEntry& f) {
+                std::wstring ext = ToLowerW(f.extension);
+                // FileEntry.extension 에 점이 붙어 있을 수도 있으므로 제거
+                if (!ext.empty() && ext[0] == L'.') ext = ext.substr(1);
+                for (const auto& ex : cfg.excludeExts)
+                    if (ext == ex) return true;
+                return false;
+            }), files.end());
+        if (files.size() < before) {
+            std::wstring extList;
+            for (size_t i = 0; i < cfg.excludeExts.size(); ++i) {
+                if (i > 0) extList += L", ";
+                extList += L"." + cfg.excludeExts[i];
+            }
+            PostLog(hwnd, L"  ✓ 확장자 제외 (" + extList + L"): "
+                + std::to_wstring(before) + L"개 → " + std::to_wstring(files.size()) + L"개");
+        }
+    }
 
     // 키워드 검색 타겟: false=파일명만(기본), true=전체 경로
     auto getSearchTarget = [&](const FileEntry& f) -> std::wstring {
@@ -767,38 +899,9 @@ static void RebuildGrid() {
 // ============================================================
 struct TreeItemData { std::wstring fullPath; bool isProtected = false; };
 
-// EDR/보안 프로그램 충돌 방지: 핵심 보안 폴더는 체크 비활성
-// 드라이브 루트("X:\") 제외, 그 하위 경로부터 검사
-// prefix 매칭: 보호 경로의 하위 폴더도 자동 보호
+// 트리뷰용 보호 경로 판별 - IsWindowsSecurityPath에 위임 (ScanThread와 공유)
 static bool IsProtectedPath(const std::wstring& path) {
-    if (path.size() <= 3) return false; // 드라이브 루트는 보호 안 함
-    // "X:\" 이후 상대 경로를 소문자로 비교
-    std::wstring rel = path.substr(3);
-    CharLowerBuffW(&rel[0], (DWORD)rel.size());
-    // 보호 경로 목록 (드라이브 루트 이후, 소문자, 후행 백슬래시 포함)
-    static const wchar_t* const k_sec[] = {
-        L"windows\\system32\\",
-        L"windows\\syswow64\\",
-        L"windows\\winsxs\\",
-        L"windows\\boot\\",
-        L"windows\\serviceprofiles\\",
-        L"windows\\csc\\",
-        L"windows\\system32\\drivers\\",
-        L"windows\\system32\\config\\",
-        L"program files\\windows defender\\",
-        L"program files\\windows defender advanced threat protection\\",
-        L"program files (x86)\\windows defender\\",
-        L"programdata\\microsoft\\windows defender\\",
-        L"programdata\\microsoft\\windows defender advanced threat protection\\",
-        nullptr
-    };
-    for (int i = 0; k_sec[i]; ++i) {
-        size_t slen = wcslen(k_sec[i]);
-        // 경로가 보호 접두사로 시작하면 보호 (하위 폴더 포함)
-        if (rel.size() >= slen && rel.compare(0, slen, k_sec[i]) == 0)
-            return true;
-    }
-    return false;
+    return IsWindowsSecurityPath(path);
 }
 
 // 드라이브 목록을 루트에 추가 (각 드라이브에 더미 자식 → 확장 화살표 표시)
@@ -928,6 +1031,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     static HWND hHtmlBtn,  hExcelBtn, hClearBtn, hDeleteOutputBtn;
     static HWND hFilterCombo;
     static HWND hKeywordEdit, hKeywordFileBtn;
+    static HWND hExtEdit, hExtFileBtn;
 
     switch (msg) {
 
@@ -995,6 +1099,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
             704, y + 2, 110, 20, hwnd, (HMENU)IDC_KEYWORD_PATH_CHK, nullptr, nullptr);
         SendMessageW(hKeywordPathChk, WM_SETFONT, (WPARAM)hF, TRUE);
+        y += 34;
+
+        // 행3.5: 확장자 제외 (xml/log/json 등 오탐 방지)
+        mkLabel(L"제외 확장자:", M, y+3, 76, 20);
+        hExtEdit = mkEdit(IDC_EXT_EXCL_EDIT, 92, y, 596, 24);
+        SendMessageW(hExtEdit, EM_SETCUEBANNER, FALSE,
+            (LPARAM)L"제외할 확장자 (공백/콤마 구분)  예) xml log json ini cfg");
+        SetWindowTextW(hExtEdit, L"xml log json");   // 기본값
+        hExtFileBtn = mkBtn(IDC_EXT_EXCL_BTN, L"파일...", 694, y, 50, 24);
         y += 34;
 
         // 행4: 옵션
@@ -1158,6 +1271,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             // 키워드 필터 파싱 (직접 입력)
             std::wstring kwText = GetCtrlText(hKeywordEdit);
             if (!kwText.empty()) cfg.keywordFilter = ParseKeywordLine(kwText);
+
+            // 확장자 제외 목록 파싱
+            std::wstring extText = GetCtrlText(hExtEdit);
+            if (!extText.empty()) cfg.excludeExts = ParseExtList(extText);
+            cfg.excludeProtectedPaths = true; // 항상 활성 (EDR 충돌 방지)
 
             // 출력 폴더 기본값
             if (cfg.outputDir.empty()) {
@@ -1366,6 +1484,25 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 if (!preview.empty() && preview.back() == L' ')
                     preview.pop_back();
                 SetWindowTextW(hKeywordEdit, preview.c_str());
+            }
+        }
+        else if (id == IDC_EXT_EXCL_BTN) {
+            // 제외 확장자 목록 텍스트 파일 선택
+            wchar_t filePath[MAX_PATH] = {};
+            OPENFILENAMEW ofn       = {};
+            ofn.lStructSize         = sizeof(ofn);
+            ofn.hwndOwner           = hwnd;
+            ofn.lpstrFilter         = L"텍스트 파일\0*.txt\0모든 파일\0*.*\0";
+            ofn.lpstrFile           = filePath;
+            ofn.nMaxFile            = MAX_PATH;
+            ofn.lpstrTitle          = L"제외 확장자 파일 선택";
+            ofn.Flags               = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
+            if (GetOpenFileNameW(&ofn)) {
+                auto exts = LoadExtListFromFile(filePath);
+                std::wstring preview;
+                for (auto& e : exts) preview += e + L" ";
+                if (!preview.empty() && preview.back() == L' ') preview.pop_back();
+                SetWindowTextW(hExtEdit, preview.c_str());
             }
         }
         else if (id == IDC_FILTER_COMBO && HIWORD(wParam) == CBN_SELCHANGE) {
@@ -1706,8 +1843,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     wc.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
     RegisterClassExW(&wc);
 
-    // 실제 클라이언트 크기 계산 (960 × 810, 스캔경로 트리뷰 +116px)
-    RECT rc = {0, 0, 960, 810};
+    // 실제 클라이언트 크기 계산 (960 × 844, 확장자 제외 행 +34px)
+    RECT rc = {0, 0, 960, 844};
     AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX, FALSE);
 
     g_hwnd = CreateWindowExW(
