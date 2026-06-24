@@ -1847,6 +1847,38 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 if (pnmtv->itemOld.lParam)
                     delete reinterpret_cast<TreeItemData*>(pnmtv->itemOld.lParam);
             }
+            // 인디터미네이트(3) 클릭 → 전체 체크(2) + cascade
+            // TVS_CHECKBOXES는 state 3에서 예측 불가한 상태로 전환하므로 NM_CLICK에서 가로챔
+            if (hdr->code == NM_CLICK) {
+                DWORD mp = GetMessagePos();
+                TVHITTESTINFO ht = {};
+                ht.pt.x = (short)LOWORD(mp);
+                ht.pt.y = (short)HIWORD(mp);
+                ScreenToClient(hScanTree, &ht.pt);
+                HTREEITEM hit = TreeView_HitTest(hScanTree, &ht);
+                if (hit && (ht.flags & TVHT_ONITEMSTATEICON)) {
+                    TVITEMW ti = {};
+                    ti.mask = TVIF_STATE;
+                    ti.hItem = hit;
+                    ti.stateMask = TVIS_STATEIMAGEMASK;
+                    TreeView_GetItem(hScanTree, &ti);
+                    int curSt = (ti.state & TVIS_STATEIMAGEMASK) >> 12;
+                    if (curSt == 3) {
+                        // 인디터미네이트 → 전체 체크(2), 자식 cascade
+                        g_treeUpdating = true;
+                        TVITEMW setTi = {};
+                        setTi.mask = TVIF_STATE;
+                        setTi.hItem = hit;
+                        setTi.stateMask = TVIS_STATEIMAGEMASK;
+                        setTi.state = INDEXTOSTATEIMAGEMASK(2);
+                        TreeView_SetItem(hScanTree, &setTi);
+                        SetChildrenState(hScanTree, hit, 2);
+                        UpdateParentState(hScanTree, hit);
+                        g_treeUpdating = false;
+                        return TRUE; // TVS_CHECKBOXES 기본 토글 억제
+                    }
+                }
+            }
         }
 
         // 탭 선택 변경
