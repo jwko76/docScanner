@@ -765,7 +765,41 @@ static void RebuildGrid() {
 // ============================================================
 // 스캔 경로 트리뷰 헬퍼
 // ============================================================
-struct TreeItemData { std::wstring fullPath; };
+struct TreeItemData { std::wstring fullPath; bool isProtected = false; };
+
+// EDR/보안 프로그램 충돌 방지: 핵심 보안 폴더는 체크 비활성
+// 드라이브 루트("X:\") 제외, 그 하위 경로부터 검사
+// prefix 매칭: 보호 경로의 하위 폴더도 자동 보호
+static bool IsProtectedPath(const std::wstring& path) {
+    if (path.size() <= 3) return false; // 드라이브 루트는 보호 안 함
+    // "X:\" 이후 상대 경로를 소문자로 비교
+    std::wstring rel = path.substr(3);
+    CharLowerBuffW(&rel[0], (DWORD)rel.size());
+    // 보호 경로 목록 (드라이브 루트 이후, 소문자, 후행 백슬래시 포함)
+    static const wchar_t* const k_sec[] = {
+        L"windows\\system32\\",
+        L"windows\\syswow64\\",
+        L"windows\\winsxs\\",
+        L"windows\\boot\\",
+        L"windows\\serviceprofiles\\",
+        L"windows\\csc\\",
+        L"windows\\system32\\drivers\\",
+        L"windows\\system32\\config\\",
+        L"program files\\windows defender\\",
+        L"program files\\windows defender advanced threat protection\\",
+        L"program files (x86)\\windows defender\\",
+        L"programdata\\microsoft\\windows defender\\",
+        L"programdata\\microsoft\\windows defender advanced threat protection\\",
+        nullptr
+    };
+    for (int i = 0; k_sec[i]; ++i) {
+        size_t slen = wcslen(k_sec[i]);
+        // 경로가 보호 접두사로 시작하면 보호 (하위 폴더 포함)
+        if (rel.size() >= slen && rel.compare(0, slen, k_sec[i]) == 0)
+            return true;
+    }
+    return false;
+}
 
 // 드라이브 목록을 루트에 추가 (각 드라이브에 더미 자식 → 확장 화살표 표시)
 static void PopulateScanTree(HWND hTree) {
@@ -818,13 +852,19 @@ static void ExpandScanTreeNode(HWND hTree, HTREEITEM hItem, const std::wstring& 
         if (fd.cFileName[0] == L'.') continue;
         if (fd.dwFileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)) continue;
         std::wstring childPath = path + fd.cFileName + L"\\";
+        bool prot = IsProtectedPath(childPath);
         TVINSERTSTRUCT tvis = {};
         tvis.hParent = hItem; tvis.hInsertAfter = TVI_SORT;
         tvis.item.mask = TVIF_TEXT | TVIF_PARAM | TVIF_CHILDREN;
         tvis.item.cChildren = 1;
-        auto* d = new TreeItemData{ childPath };
+        auto* d = new TreeItemData{ childPath, prot };
         tvis.item.lParam = (LPARAM)d;
-        tvis.item.pszText = fd.cFileName;
+        // 보호 폴더: 표시명에 "[보호됨]" 추가
+        wchar_t nameBuf[MAX_PATH + 16] = {};
+        if (prot) _snwprintf_s(nameBuf, _countof(nameBuf), _TRUNCATE,
+                               L"%s  [보호됨]", fd.cFileName);
+        else       wcscpy_s(nameBuf, fd.cFileName);
+        tvis.item.pszText = nameBuf;
         HTREEITEM hSub = TreeView_InsertItem(hTree, &tvis);
         // 더미 자식
         TVINSERTSTRUCT dummy = {};
@@ -847,7 +887,7 @@ static std::vector<std::wstring> GetCheckedScanPaths(HWND hTree) {
             int chk = (ti.state >> 12) - 1; // 1=체크됨, 0=미체크
             if (chk == 1 && ti.lParam) {
                 auto* d = reinterpret_cast<TreeItemData*>(ti.lParam);
-                if (!d->fullPath.empty()) paths.push_back(d->fullPath);
+                if (!d->fullPath.empty() && !d->isProtected) paths.push_back(d->fullPath);
             }
             walk(TreeView_GetChild(hTree, hItem));
             hItem = TreeView_GetNextSibling(hTree, hItem);
@@ -1512,7 +1552,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     case WM_NOTIFY: {
         auto* hdr = reinterpret_cast<NMHDR*>(lParam);
 
-        // 스캔 경로 트리뷰: 폴더 확장 시 하위 폴더 동적 로드
+        // 스캔 경로 트리뷰: 폴더 확장 / 체크 변경 / 항목 삭제 처리
         if (hdr->hwndFrom == hScanTree) {
             if (hdr->code == TVN_ITEMEXPANDING) {
                 auto* pnmtv = reinterpret_cast<NMTREEVIEWW*>(lParam);
@@ -1523,6 +1563,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                         auto* d = reinterpret_cast<TreeItemData*>(ti.lParam);
                         ExpandScanTreeNode(hScanTree, pnmtv->itemNew.hItem, d->fullPath);
                     }
+                }
+            }
+            // 보안 폴더 체크 차단: TVN_ITEMCHANGING에서 변경 전에 거부 (깜빡임 없음)
+            if (hdr->code == TVN_ITEMCHANGING) {
+                auto* p = reinterpret_cast<NMTVITEMCHANGE*>(lParam);
+                if ((p->uChanged & TVIF_STATE) && p->lParam) {
+                    auto* d = reinterpret_cast<TreeItemData*>(p->lParam);
+                    int newChk = (p->uStateNew & TVIS_STATEIMAGEMASK) >> 12;
+                    if (d->isProtected && newChk == 2) // 2=체크 시도 → 차단
+                        return TRUE; // TRUE 반환 = 변경 거부
                 }
             }
             if (hdr->code == TVN_DELETEITEM) {
