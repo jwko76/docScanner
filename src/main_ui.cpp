@@ -1033,6 +1033,7 @@ static std::vector<std::wstring> GetCheckedScanPaths(HWND hTree) {
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     // 컨트롤 핸들 (정적으로 유지)
     static HWND hScanTree, hKeywordPathChk;
+    static HWND hFilterLabel;
     static HWND hOutEdit,  hOutBrowse;
     static HWND hSkipChk,  hLoadCombo, hMaxSizeEdit;
     static HWND hStartBtn, hStopBtn;
@@ -1145,7 +1146,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         SetWindowTextW(hMaxSizeEdit, L"100");
 
         // 탐지 유형 필터 (행3 우측)
-        mkLabel(L"탐지 유형:", 590, y+3, 74, 20);
+        hFilterLabel = CreateWindowW(L"STATIC", L"탐지 유형:", WS_CHILD|WS_VISIBLE, 590, y+3, 74, 20, hwnd, nullptr, nullptr, nullptr);
+        SendMessageW(hFilterLabel, WM_SETFONT, (WPARAM)hF, TRUE);
         hFilterCombo = CreateWindowW(L"COMBOBOX", L"",
             WS_CHILD|WS_VISIBLE|CBS_DROPDOWNLIST|WS_VSCROLL,
             666, y, 210, 220, hwnd, (HMENU)IDC_FILTER_COMBO, nullptr, nullptr);
@@ -1809,6 +1811,67 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         return 0;
     }
 
+    case WM_GETMINMAXINFO: {
+        // 최소 창 크기: 클라이언트 900×600
+        auto* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
+        RECT rc2 = {0, 0, 900, 600};
+        AdjustWindowRect(&rc2, WS_OVERLAPPEDWINDOW, FALSE);
+        mmi->ptMinTrackSize.x = rc2.right - rc2.left;
+        mmi->ptMinTrackSize.y = rc2.bottom - rc2.top;
+        return 0;
+    }
+
+    case WM_SIZE: {
+        if (wParam == SIZE_MINIMIZED) return 0;
+        int cW2 = LOWORD(lParam);
+        int cH2 = HIWORD(lParam);
+        if (cW2 < 1 || cH2 < 1) return 0;
+        int tabW2 = cW2 - 24;
+        int btnY2  = cH2 - 12 - 28;          // 하단 버튼 y (하단 12px 마진)
+        int tabH2  = btnY2 - 8 - 390;        // 탭 높이 (버튼 위 8px 여백, 탭 y=390)
+        if (tabH2 < 80) tabH2 = 80;
+        HDWP dwp = BeginDeferWindowPos(22);
+        auto dp = [&](HWND h, int x, int y, int w, int ht) {
+            if (h) DeferWindowPos(dwp, h, nullptr, x, y, w, ht,
+                SWP_NOZORDER | SWP_NOACTIVATE);
+        };
+        // 스캔 경로 트리뷰 (폭 신축)
+        dp(hScanTree, 12, 32, tabW2, 122);
+        // 출력 경로 행: 에딧 신축, 버튼 우측 고정
+        dp(hOutEdit,         96, 160, cW2 - 96 - 6 - 82 - 6 - 82 - 12, 24);
+        dp(hOutBrowse,       cW2 - 12 - 82 - 6 - 82, 160, 82, 24);
+        dp(hDeleteOutputBtn, cW2 - 12 - 82,           160, 82, 24);
+        // 키워드 행: 에딧 신축, 파일버튼+체크박스 우측 고정
+        dp(hKeywordEdit,    92, 194, cW2 - 92 - 6 - 50 - 6 - 110 - 12, 24);
+        dp(hKeywordFileBtn, cW2 - 12 - 110 - 6 - 50,  194, 50, 24);
+        dp(hKeywordPathChk, cW2 - 12 - 110,            196, 110, 20);
+        // 확장자 제외 행: 에딧 신축, 파일버튼 우측 고정
+        dp(hExtEdit,    92, 228, cW2 - 92 - 6 - 50 - 12, 24);
+        dp(hExtFileBtn, cW2 - 12 - 50, 228, 50, 24);
+        // 옵션 행: FilterLabel+FilterCombo 우측 고정
+        dp(hFilterLabel, cW2 - 12 - 210 - 6 - 74, 265,  74, 20);
+        dp(hFilterCombo, cW2 - 12 - 210,           262, 210, 220);
+        // 진행률 바 + 상태 레이블 (폭 신축)
+        dp(hProgress, 12, 336, tabW2, 18);
+        dp(hStatus,   12, 362, tabW2, 20);
+        // 탭 컨트롤 (폭·높이 신축)
+        dp(hTab, 12, 390, tabW2, tabH2);
+        // 탭 내용 영역 재계산
+        RECT trc = { 0, 0, tabW2, tabH2 };
+        TabCtrl_AdjustRect(hTab, FALSE, &trc);
+        int tcx = 12 + trc.left, tcy = 390 + trc.top;
+        int tcw = trc.right - trc.left, tch = trc.bottom - trc.top;
+        dp(hLogEdit,  tcx, tcy, tcw, tch);
+        dp(hFileGrid, tcx, tcy, tcw, tch);
+        dp(hGrid,     tcx, tcy, tcw, tch);
+        // 하단 버튼 (하단 고정)
+        dp(hHtmlBtn,  12,       btnY2, 160, 28);
+        dp(hExcelBtn, 12 + 168, btnY2, 160, 28);
+        dp(hClearBtn, 12 + 336, btnY2, 110, 28);
+        EndDeferWindowPos(dwp);
+        return 0;
+    }
+
     case WM_DESTROY:
         g_running.store(false);
         PostQuitMessage(0);
@@ -1836,14 +1899,14 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     wc.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
     RegisterClassExW(&wc);
 
-    // 실제 클라이언트 크기 계산 (960 × 844, 확장자 제외 행 +34px)
-    RECT rc = {0, 0, 960, 844};
-    AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX, FALSE);
+    // 초기 클라이언트 크기 1100×900 (리사이즈·최대화 가능)
+    RECT rc = {0, 0, 1100, 900};
+    AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
 
     g_hwnd = CreateWindowExW(
         0, L"PiiScannerUI",
         L"PiiScanner UI — 개인정보/민감정보 탐지",
-        WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX,
+        WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT,
         rc.right - rc.left, rc.bottom - rc.top,
         nullptr, nullptr, hInst, nullptr
