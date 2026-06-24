@@ -65,6 +65,8 @@
 #define IDC_FILE_GRID           122   // 키워드 매칭 파일 목록 그리드
 #define IDC_CLEAR_RESULT_BTN    123   // 결과 초기화 (UI + 출력 파일 삭제)
 #define IDC_DELETE_OUTPUT_BTN   124   // 출력 폴더의 모든 xls/html 결과 파일 삭제
+#define IDC_SCAN_TREE           125   // 스캔 경로 트리뷰 (체크박스 다중 선택)
+#define IDC_KEYWORD_PATH_CHK    126   // 키워드를 경로 전체에서 검색 (기본: 파일명만)
 
 // 우클릭 컨텍스트 메뉴 ID
 #define IDM_OPEN_FILE   201
@@ -144,6 +146,7 @@ static HWND         g_hGrid        = nullptr;
 static HWND         g_hFileGrid    = nullptr;
 static HWND         g_hFilterCombo = nullptr;
 static HWND         g_hLoadCombo   = nullptr;
+static HWND         g_hScanTree    = nullptr;
 static bool         g_firstResult  = false;   // 첫 PII 결과 수신 여부 (실시간 탭 전환용)
 // 키워드 파일 목록 (탭1)
 static std::vector<FileListItem> g_allFileItems;
@@ -210,12 +213,13 @@ static void PostLog(HWND hwnd, const std::wstring& msg) {
 // 스캔 설정 구조체
 // ============================================================
 struct ScanConfig {
-    std::wstring scanPath;
+    std::vector<std::wstring> scanPaths;           // 비어 있으면 전체 드라이브 스캔
     std::wstring outputDir;
-    bool         skipImages  = true;
-    int          loadLevel   = 1;        // 0=낮음(~25%), 1=중간(~50%), 2=높음(100%)
-    LONGLONG     maxFileSize = 100LL * 1024 * 1024;
-    KeywordFilter keywordFilter;         // 파일 이름/경로 키워드 필터
+    bool         skipImages        = true;
+    int          loadLevel         = 1;            // 0=낮음(~25%), 1=중간(~50%), 2=높음(100%)
+    LONGLONG     maxFileSize       = 100LL * 1024 * 1024;
+    KeywordFilter keywordFilter;                   // 파일 이름/경로 키워드 필터
+    bool         keywordSearchPath = false;        // true=경로 전체, false=파일명만
 };
 
 // ============================================================
@@ -362,12 +366,19 @@ static void ScanThread(HWND hwnd, ScanConfig cfg) {
     if (!g_running) { PostLog(hwnd, L"[취소됨]"); PostMessageW(hwnd, WM_SCAN_COMPLETE, 0, 0); return; }
 
     // Step 2: 파일 목록 조회
-    std::wstring pathDesc = cfg.scanPath.empty()
-        ? L"전체 드라이브" : cfg.scanPath;
+    std::wstring pathDesc;
+    if (cfg.scanPaths.empty()) {
+        pathDesc = L"전체 드라이브";
+    } else {
+        for (size_t i = 0; i < cfg.scanPaths.size(); ++i) {
+            if (i > 0) pathDesc += L", ";
+            pathDesc += cfg.scanPaths[i];
+        }
+    }
     PostLog(hwnd, L"[2/4] 파일 목록 조회 중 (" + pathDesc + L")...");
 
     // 전체 드라이브 스캔 시 시스템 폴더 자동 제외 안내
-    if (cfg.scanPath.empty()) {
+    if (cfg.scanPaths.empty()) {
         auto excluded = EverythingScanner::systemExcludedPaths();
         PostLog(hwnd, L"  ℹ 시스템 폴더 " + std::to_wstring(excluded.size())
             + L"개 자동 제외 (Windows, Program Files, ProgramData, $Recycle.Bin 등)");
@@ -375,18 +386,41 @@ static void ScanThread(HWND hwnd, ScanConfig cfg) {
 
     auto tStart = std::chrono::steady_clock::now();
 
-    std::vector<FileEntry> files = scanner.scanFiles(cfg.scanPath, nullptr);
+    std::vector<FileEntry> files;
+    if (cfg.scanPaths.empty()) {
+        files = scanner.scanFiles(L"", nullptr);
+    } else {
+        for (const auto& p : cfg.scanPaths) {
+            auto part = scanner.scanFiles(p, nullptr);
+            files.insert(files.end(), part.begin(), part.end());
+        }
+        // 경로 중복 제거 (여러 경로 선택 시)
+        std::sort(files.begin(), files.end(), [](const FileEntry& a, const FileEntry& b) {
+            return _wcsicmp(a.fullPath.c_str(), b.fullPath.c_str()) < 0;
+        });
+        files.erase(std::unique(files.begin(), files.end(), [](const FileEntry& a, const FileEntry& b) {
+            return _wcsicmp(a.fullPath.c_str(), b.fullPath.c_str()) == 0;
+        }), files.end());
+    }
 
     if (!g_running) { PostLog(hwnd, L"[취소됨]"); PostMessageW(hwnd, WM_SCAN_COMPLETE, 0, 0); return; }
 
-    // 키워드 필터 적용 (파일 이름/경로 기준)
+    // 키워드 검색 타겟: false=파일명만(기본), true=전체 경로
+    auto getSearchTarget = [&](const FileEntry& f) -> std::wstring {
+        if (cfg.keywordSearchPath) return f.fullPath;
+        auto sl = f.fullPath.find_last_of(L"\\/");
+        return (sl != std::wstring::npos) ? f.fullPath.substr(sl + 1) : f.fullPath;
+    };
+
+    // 키워드 필터 적용
     if (!cfg.keywordFilter.empty()) {
         size_t before = files.size();
         files.erase(std::remove_if(files.begin(), files.end(),
             [&](const FileEntry& f) {
-                return !MatchesKeywordFilter(f.fullPath, cfg.keywordFilter);
+                return !MatchesKeywordFilter(getSearchTarget(f), cfg.keywordFilter);
             }), files.end());
-        PostLog(hwnd, L"  ✓ 키워드 필터: " + std::to_wstring(before)
+        std::wstring scopeNote = cfg.keywordSearchPath ? L" (경로 전체 검색)" : L" (파일명 검색)";
+        PostLog(hwnd, L"  ✓ 키워드 필터" + scopeNote + L": " + std::to_wstring(before)
             + L"개 → " + std::to_wstring(files.size()) + L"개 파일 선택");
 
         // 키워드 매칭 파일 목록 → UI(탭1) 전송
@@ -400,7 +434,7 @@ static void ScanThread(HWND hwnd, ScanConfig cfg) {
                 fi.fileName        = (sl != std::wstring::npos) ? f.fullPath.substr(sl + 1) : f.fullPath;
                 fi.extension       = f.extension;
                 fi.fileSize        = f.fileSize;
-                fi.matchedKeywords = GetMatchedKeywords(f.fullPath, cfg.keywordFilter);
+                fi.matchedKeywords = GetMatchedKeywords(getSearchTarget(f), cfg.keywordFilter);
                 flist->push_back(std::move(fi));
             }
             PostMessageW(hwnd, WM_SCAN_FILELIST, (WPARAM)flist, 0);
@@ -729,11 +763,121 @@ static void RebuildGrid() {
 }
 
 // ============================================================
+// 스캔 경로 트리뷰 헬퍼
+// ============================================================
+struct TreeItemData { std::wstring fullPath; };
+
+// 드라이브 목록을 루트에 추가 (각 드라이브에 더미 자식 → 확장 화살표 표시)
+static void PopulateScanTree(HWND hTree) {
+    DWORD drives = GetLogicalDrives();
+    for (int i = 0; i < 26; ++i) {
+        if (!(drives & (1u << i))) continue;
+        wchar_t drv[4] = { (wchar_t)(L'A' + i), L':', L'\\', L'\0' };
+        UINT type = GetDriveTypeW(drv);
+        if (type == DRIVE_NO_ROOT_DIR) continue;
+        wchar_t label[64] = {};
+        GetVolumeInformationW(drv, label, 64, nullptr, nullptr, nullptr, nullptr, 0);
+        std::wstring txt = drv;
+        if (label[0]) txt += L"  " + std::wstring(label);
+
+        TVINSERTSTRUCT tvis = {};
+        tvis.hParent = TVI_ROOT; tvis.hInsertAfter = TVI_LAST;
+        tvis.item.mask = TVIF_TEXT | TVIF_PARAM | TVIF_CHILDREN;
+        tvis.item.cChildren = 1;
+        auto* d = new TreeItemData{ drv };
+        tvis.item.lParam = (LPARAM)d;
+        wchar_t tbuf[128]; wcscpy_s(tbuf, txt.c_str());
+        tvis.item.pszText = tbuf;
+        HTREEITEM hDrv = TreeView_InsertItem(hTree, &tvis);
+        // 더미 자식 → 확장 화살표 유지
+        TVINSERTSTRUCT dummy = {};
+        dummy.hParent = hDrv; dummy.hInsertAfter = TVI_LAST;
+        dummy.item.mask = TVIF_TEXT;
+        dummy.item.pszText = const_cast<LPWSTR>(L"\x01");
+        TreeView_InsertItem(hTree, &dummy);
+    }
+}
+
+// 트리 노드 확장 시 실제 하위 폴더 로드 (숨김/시스템 제외)
+static void ExpandScanTreeNode(HWND hTree, HTREEITEM hItem, const std::wstring& path) {
+    // 이미 확장됐는지 확인 (더미 \x01 노드가 있으면 미확장)
+    HTREEITEM hChild = TreeView_GetChild(hTree, hItem);
+    if (hChild) {
+        TVITEMW ti = {}; ti.mask = TVIF_TEXT; ti.hItem = hChild;
+        wchar_t buf[4] = {}; ti.pszText = buf; ti.cchTextMax = 4;
+        TreeView_GetItem(hTree, &ti);
+        if (buf[0] == L'\x01') TreeView_DeleteItem(hTree, hChild);
+        else return; // 이미 확장됨
+    }
+    std::wstring search = path + L"*";
+    WIN32_FIND_DATAW fd = {};
+    HANDLE hFind = FindFirstFileW(search.c_str(), &fd);
+    if (hFind == INVALID_HANDLE_VALUE) return;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        if (fd.cFileName[0] == L'.') continue;
+        if (fd.dwFileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)) continue;
+        std::wstring childPath = path + fd.cFileName + L"\\";
+        TVINSERTSTRUCT tvis = {};
+        tvis.hParent = hItem; tvis.hInsertAfter = TVI_SORT;
+        tvis.item.mask = TVIF_TEXT | TVIF_PARAM | TVIF_CHILDREN;
+        tvis.item.cChildren = 1;
+        auto* d = new TreeItemData{ childPath };
+        tvis.item.lParam = (LPARAM)d;
+        tvis.item.pszText = fd.cFileName;
+        HTREEITEM hSub = TreeView_InsertItem(hTree, &tvis);
+        // 더미 자식
+        TVINSERTSTRUCT dummy = {};
+        dummy.hParent = hSub; dummy.hInsertAfter = TVI_LAST;
+        dummy.item.mask = TVIF_TEXT;
+        dummy.item.pszText = const_cast<LPWSTR>(L"\x01");
+        TreeView_InsertItem(hTree, &dummy);
+    } while (FindNextFileW(hFind, &fd));
+    FindClose(hFind);
+}
+
+// 트리에서 체크된 경로 수집 + 상위 경로 포함 시 하위 경로 제거
+static std::vector<std::wstring> GetCheckedScanPaths(HWND hTree) {
+    std::vector<std::wstring> paths;
+    std::function<void(HTREEITEM)> walk = [&](HTREEITEM hItem) {
+        while (hItem) {
+            TVITEMW ti = {}; ti.mask = TVIF_STATE | TVIF_PARAM;
+            ti.hItem = hItem; ti.stateMask = TVIS_STATEIMAGEMASK;
+            TreeView_GetItem(hTree, &ti);
+            int chk = (ti.state >> 12) - 1; // 1=체크됨, 0=미체크
+            if (chk == 1 && ti.lParam) {
+                auto* d = reinterpret_cast<TreeItemData*>(ti.lParam);
+                if (!d->fullPath.empty()) paths.push_back(d->fullPath);
+            }
+            walk(TreeView_GetChild(hTree, hItem));
+            hItem = TreeView_GetNextSibling(hTree, hItem);
+        }
+    };
+    walk(TreeView_GetRoot(hTree));
+    // 정렬 후 상위 경로에 포함되는 하위 경로 제거
+    std::sort(paths.begin(), paths.end(), [](const std::wstring& a, const std::wstring& b) {
+        return _wcsicmp(a.c_str(), b.c_str()) < 0;
+    });
+    std::vector<std::wstring> result;
+    for (const auto& p : paths) {
+        bool isSub = false;
+        for (const auto& q : result) {
+            if (q.size() < p.size() &&
+                _wcsnicmp(p.c_str(), q.c_str(), q.size()) == 0) {
+                isSub = true; break;
+            }
+        }
+        if (!isSub) result.push_back(p);
+    }
+    return result;
+}
+
+// ============================================================
 // 윈도우 프로시저
 // ============================================================
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     // 컨트롤 핸들 (정적으로 유지)
-    static HWND hScanEdit, hScanBrowse;
+    static HWND hScanTree, hKeywordPathChk;
     static HWND hOutEdit,  hOutBrowse;
     static HWND hSkipChk,  hLoadCombo, hMaxSizeEdit;
     static HWND hStartBtn, hStopBtn;
@@ -750,7 +894,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     // ── 창 생성 ───────────────────────────────────────────────
     case WM_CREATE: {
         INITCOMMONCONTROLSEX icc = { sizeof(icc),
-            ICC_PROGRESS_CLASS | ICC_TAB_CLASSES | ICC_LISTVIEW_CLASSES };
+            ICC_PROGRESS_CLASS | ICC_TAB_CLASSES | ICC_LISTVIEW_CLASSES | ICC_TREEVIEW_CLASSES };
         InitCommonControlsEx(&icc);
 
         HFONT hF = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
@@ -776,12 +920,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return hc;
         };
 
-        // 행1: 스캔 경로
-        mkLabel(L"스캔 경로:", M, y+3, 80, 20);
-        hScanEdit   = mkEdit(IDC_SCAN_PATH_EDIT, 96, y, 492, 24);
-        hScanBrowse = mkBtn(IDC_SCAN_PATH_BROWSE, L"찾아보기", 594, y, 82, 24);
-        SendMessageW(hScanEdit, EM_SETCUEBANNER, FALSE, (LPARAM)L"(비워두면 전체 드라이브 탐색)");
-        y += 34;
+        // 행1: 스캔 경로 트리뷰 (체크 없으면 전체 드라이브 탐색)
+        mkLabel(L"스캔 경로  (체크 없으면 전체 드라이브 탐색):", M, y, 330, 18);
+        hScanTree = CreateWindowExW(WS_EX_CLIENTEDGE, WC_TREEVIEWW, L"",
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL |
+            TVS_HASLINES | TVS_HASBUTTONS | TVS_LINESATROOT | TVS_CHECKBOXES,
+            M, y + 20, W - 24, 122,
+            hwnd, (HMENU)IDC_SCAN_TREE, nullptr, nullptr);
+        SendMessageW(hScanTree, WM_SETFONT, (WPARAM)hF, TRUE);
+        g_hScanTree = hScanTree;
+        PopulateScanTree(hScanTree);
+        y += 20 + 122 + 6;  // 148
 
         // 행2: 출력 경로
         mkLabel(L"출력 경로:", M, y+3, 80, 20);
@@ -795,13 +944,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         SetWindowTextW(hOutEdit, exeDir);
         y += 34;
 
-        // 행3: 파일 키워드 검색
+        // 행3: 파일 키워드 검색 (파일명 기준, 옵션으로 경로 전체 검색)
         mkLabel(L"키워드 검색:", M, y+3, 76, 20);
-        hKeywordEdit = mkEdit(IDC_KEYWORD_EDIT, 92, y, 628, 24);
+        hKeywordEdit = mkEdit(IDC_KEYWORD_EDIT, 92, y, 548, 24);
         SendMessageW(hKeywordEdit, EM_LIMITTEXT, 2048, 0);   // 2KB 제한 (보안)
         SendMessageW(hKeywordEdit, EM_SETCUEBANNER, FALSE,
-            (LPARAM)L"스페이스=OR  +필수단어  -제외단어  확장자포함  예) 계약서 +2024 -임시 .xlsx");
-        hKeywordFileBtn = mkBtn(IDC_KEYWORD_FILE_BTN, L"파일...", 726, y, 50, 24);
+            (LPARAM)L"파일명 기준: 스페이스=OR  +필수  -제외  예) 계약서 +2024 -임시 .xlsx");
+        hKeywordFileBtn = mkBtn(IDC_KEYWORD_FILE_BTN, L"파일...", 646, y, 50, 24);
+        hKeywordPathChk = CreateWindowW(L"BUTTON", L"경로명 포함",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            704, y + 2, 110, 20, hwnd, (HMENU)IDC_KEYWORD_PATH_CHK, nullptr, nullptr);
+        SendMessageW(hKeywordPathChk, WM_SETFONT, (WPARAM)hF, TRUE);
         y += 34;
 
         // 행4: 옵션
@@ -943,17 +1096,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     case WM_COMMAND: {
         WORD id = LOWORD(wParam);
 
-        if (id == IDC_SCAN_PATH_BROWSE) {
-            auto p = BrowseFolder(hwnd, L"스캔할 폴더 선택");
-            if (!p.empty()) SetWindowTextW(hScanEdit, p.c_str());
-        }
-        else if (id == IDC_OUTPUT_PATH_BROWSE) {
+        if (id == IDC_OUTPUT_PATH_BROWSE) {
             auto p = BrowseFolder(hwnd, L"리포트 저장 폴더 선택");
             if (!p.empty()) SetWindowTextW(hOutEdit, p.c_str());
         }
         else if (id == IDC_START_BTN) {
             ScanConfig cfg;
-            cfg.scanPath   = GetCtrlText(hScanEdit);
+            cfg.scanPaths         = GetCheckedScanPaths(hScanTree);
+            cfg.keywordSearchPath = (SendMessageW(hKeywordPathChk, BM_GETCHECK, 0, 0) == BST_CHECKED);
             cfg.outputDir  = GetCtrlText(hOutEdit);
             cfg.skipImages = (SendMessageW(hSkipChk, BM_GETCHECK, 0, 0) == BST_CHECKED);
             if (g_hLoadCombo) {
@@ -1362,6 +1512,26 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     case WM_NOTIFY: {
         auto* hdr = reinterpret_cast<NMHDR*>(lParam);
 
+        // 스캔 경로 트리뷰: 폴더 확장 시 하위 폴더 동적 로드
+        if (hdr->hwndFrom == hScanTree) {
+            if (hdr->code == TVN_ITEMEXPANDING) {
+                auto* pnmtv = reinterpret_cast<NMTREEVIEWW*>(lParam);
+                if (pnmtv->action == TVE_EXPAND) {
+                    TVITEMW ti = {}; ti.mask = TVIF_PARAM; ti.hItem = pnmtv->itemNew.hItem;
+                    TreeView_GetItem(hScanTree, &ti);
+                    if (ti.lParam) {
+                        auto* d = reinterpret_cast<TreeItemData*>(ti.lParam);
+                        ExpandScanTreeNode(hScanTree, pnmtv->itemNew.hItem, d->fullPath);
+                    }
+                }
+            }
+            if (hdr->code == TVN_DELETEITEM) {
+                auto* pnmtv = reinterpret_cast<NMTREEVIEWW*>(lParam);
+                if (pnmtv->itemOld.lParam)
+                    delete reinterpret_cast<TreeItemData*>(pnmtv->itemOld.lParam);
+            }
+        }
+
         // 탭 선택 변경
         if (hdr->hwndFrom == hTab && hdr->code == TCN_SELCHANGE) {
             int sel = TabCtrl_GetCurSel(hTab);
@@ -1471,7 +1641,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 // wWinMain
 // ============================================================
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
-    INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_PROGRESS_CLASS | ICC_STANDARD_CLASSES };
+    INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_PROGRESS_CLASS | ICC_STANDARD_CLASSES | ICC_TREEVIEW_CLASSES };
     InitCommonControlsEx(&icc);
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
@@ -1486,8 +1656,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     wc.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
     RegisterClassExW(&wc);
 
-    // 실제 클라이언트 크기 계산 (960 × 694, 키워드 행 34px 추가)
-    RECT rc = {0, 0, 960, 694};
+    // 실제 클라이언트 크기 계산 (960 × 810, 스캔경로 트리뷰 +116px)
+    RECT rc = {0, 0, 960, 810};
     AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX, FALSE);
 
     g_hwnd = CreateWindowExW(
