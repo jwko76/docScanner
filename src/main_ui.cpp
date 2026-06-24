@@ -210,6 +210,17 @@ static void PostLog(HWND hwnd, const std::wstring& msg) {
     PostMessageW(hwnd, WM_SCAN_LOG, (WPARAM)p, 0);
 }
 
+// 탐색기에서 파일을 선택 상태로 열기
+// ShellExecute /select, 는 숨김 폴더·AppData 등에서 바탕화면을 표시하는 버그 존재
+// → SHOpenFolderAndSelectItems 사용 (Explorer 내부 API, 모든 경로 정상 처리)
+static void ExploreAndSelect(const std::wstring& filePath) {
+    PIDLIST_ABSOLUTE pidl = nullptr;
+    if (SUCCEEDED(SHParseDisplayName(filePath.c_str(), nullptr, &pidl, 0, nullptr))) {
+        SHOpenFolderAndSelectItems(pidl, 0, nullptr, 0);
+        CoTaskMemFree(pidl);
+    }
+}
+
 
 // ============================================================
 // 스캔 설정 구조체
@@ -1749,8 +1760,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (sel >= 0 && sel < (int)g_allFileItems.size()) {
                 const std::wstring& path = g_allFileItems[sel].filePath;
                 ShellExecuteW(hwnd, L"open", path.c_str(), nullptr, nullptr, SW_SHOW);
-                std::wstring arg = L"/select,\"" + path + L"\"";
-                ShellExecuteW(hwnd, L"open", L"explorer.exe", arg.c_str(), nullptr, SW_SHOW);
+                ExploreAndSelect(path);
             }
         }
 
@@ -1759,12 +1769,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             int sel = ListView_GetNextItem(hGrid, -1, LVNI_SELECTED);
             if (sel >= 0 && sel < (int)g_gridPaths.size()) {
                 const std::wstring& path = g_gridPaths[sel];
-                // 1) 소스 파일 직접 열기
                 ShellExecuteW(hwnd, L"open", path.c_str(), nullptr, nullptr, SW_SHOW);
-                // 2) 탐색기에서 해당 파일을 선택 상태로 폴더 열기
-                std::wstring arg = L"/select,\"" + path + L"\"";
-                ShellExecuteW(hwnd, L"open", L"explorer.exe",
-                    arg.c_str(), nullptr, SW_SHOW);
+                ExploreAndSelect(path);
             }
         }
         return 0;
@@ -1786,8 +1792,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (cmd == IDM_OPEN_FILE) {
                 ShellExecuteW(hwnd, L"open", path.c_str(), nullptr, nullptr, SW_SHOW);
             } else if (cmd == IDM_OPEN_FOLDER) {
-                std::wstring arg = L"/select,\"" + path + L"\"";
-                ShellExecuteW(hwnd, L"open", L"explorer.exe", arg.c_str(), nullptr, SW_SHOW);
+                ExploreAndSelect(path);
             }
             return 0;
         }
@@ -1808,10 +1813,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         if (cmd == IDM_OPEN_FILE) {
             ShellExecuteW(hwnd, L"open", path.c_str(), nullptr, nullptr, SW_SHOW);
         } else if (cmd == IDM_OPEN_FOLDER) {
-            // 탐색기에서 파일 선택 표시
-            std::wstring arg = L"/select,\"" + path + L"\"";
-            ShellExecuteW(hwnd, L"open", L"explorer.exe",
-                arg.c_str(), nullptr, SW_SHOW);
+            ExploreAndSelect(path);
         }
         return 0;
     }
