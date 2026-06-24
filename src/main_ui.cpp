@@ -1621,21 +1621,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         return 0;
     }
 
-    // ── 트리 체크박스 cascade (TVN_ITEMCHANGING + PostMessage 방식) ─────
-    case WM_APP + 20: {
-        // TVN_ITEMCHANGING에서 PostMessage한 후 여기서 처리
-        // wParam = HTREEITEM, lParam = new check state (1 or 2)
-        HTREEITEM hChanged = (HTREEITEM)wParam;
-        int       newSt    = (int)lParam;
-        if (!g_treeUpdating && hChanged && (newSt == 1 || newSt == 2)) {
-            g_treeUpdating = true;
-            SetChildrenState(hScanTree, hChanged, newSt);
-            UpdateParentState(hScanTree, hChanged);
-            g_treeUpdating = false;
-        }
-        return 0;
-    }
-
     // ── 사용자 정의 메시지 ────────────────────────────────────
     case WM_SCAN_LOG: {
         wchar_t* msg = reinterpret_cast<wchar_t*>(wParam);
@@ -1827,19 +1812,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     }
                 }
             }
-            // 보안 폴더 체크 차단 + 체크 변경 후 자식/부모 업데이트 예약
+            // 보안 폴더 프로그래밍적 체크 차단 (이중 방어)
             if (hdr->code == TVN_ITEMCHANGING) {
                 auto* p = reinterpret_cast<NMTVITEMCHANGE*>(lParam);
                 if ((p->uChanged & TVIF_STATE) && p->lParam) {
                     auto* d = reinterpret_cast<TreeItemData*>(p->lParam);
                     int newChk = (p->uStateNew & TVIS_STATEIMAGEMASK) >> 12;
-                    if (d->isProtected && newChk == 2) // 2=체크 시도 → 차단
-                        return TRUE; // TRUE 반환 = 변경 거부
-                    // 사용자 클릭에 의한 체크/해제: 상태 반영 후 처리하도록 PostMessage
-                    // (TVN_ITEMCHANGED는 ComCtl32 v6 전용이라 PostMessage로 대체)
-                    if (!g_treeUpdating && (newChk == 1 || newChk == 2))
-                        PostMessageW(hwnd, WM_APP + 20,
-                            (WPARAM)p->hItem, (LPARAM)newChk);
+                    if (d->isProtected && newChk == 2)
+                        return TRUE;
                 }
             }
             if (hdr->code == TVN_DELETEITEM) {
@@ -1847,8 +1827,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 if (pnmtv->itemOld.lParam)
                     delete reinterpret_cast<TreeItemData*>(pnmtv->itemOld.lParam);
             }
-            // 인디터미네이트(3) 클릭 → 전체 체크(2) + cascade
-            // TVS_CHECKBOXES는 state 3에서 예측 불가한 상태로 전환하므로 NM_CLICK에서 가로챔
+            // NM_CLICK: 모든 체크박스 클릭을 직접 처리
+            // TVS_CHECKBOXES의 기본 토글에 의존하지 않고 완전히 대체
+            // state 1(미체크)→2(체크), 2→1, 3(인디터미네이트)→2
             if (hdr->code == NM_CLICK) {
                 DWORD mp = GetMessagePos();
                 TVHITTESTINFO ht = {};
@@ -1858,25 +1839,26 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 HTREEITEM hit = TreeView_HitTest(hScanTree, &ht);
                 if (hit && (ht.flags & TVHT_ONITEMSTATEICON)) {
                     TVITEMW ti = {};
-                    ti.mask = TVIF_STATE;
+                    ti.mask = TVIF_STATE | TVIF_PARAM;
                     ti.hItem = hit;
                     ti.stateMask = TVIS_STATEIMAGEMASK;
                     TreeView_GetItem(hScanTree, &ti);
                     int curSt = (ti.state & TVIS_STATEIMAGEMASK) >> 12;
-                    if (curSt == 3) {
-                        // 인디터미네이트 → 전체 체크(2), 자식 cascade
-                        g_treeUpdating = true;
-                        TVITEMW setTi = {};
-                        setTi.mask = TVIF_STATE;
-                        setTi.hItem = hit;
-                        setTi.stateMask = TVIS_STATEIMAGEMASK;
-                        setTi.state = INDEXTOSTATEIMAGEMASK(2);
-                        TreeView_SetItem(hScanTree, &setTi);
-                        SetChildrenState(hScanTree, hit, 2);
-                        UpdateParentState(hScanTree, hit);
-                        g_treeUpdating = false;
-                        return TRUE; // TVS_CHECKBOXES 기본 토글 억제
-                    }
+                    bool prot = ti.lParam &&
+                        reinterpret_cast<TreeItemData*>(ti.lParam)->isProtected;
+                    if (prot) return TRUE; // 보호 폴더: 변경 불가
+                    // 토글: 체크(2)→미체크(1), 그 외(1,3)→체크(2)
+                    int nextSt = (curSt == 2) ? 1 : 2;
+                    g_treeUpdating = true;
+                    TVITEMW s = {};
+                    s.mask = TVIF_STATE; s.hItem = hit;
+                    s.stateMask = TVIS_STATEIMAGEMASK;
+                    s.state = INDEXTOSTATEIMAGEMASK(nextSt);
+                    TreeView_SetItem(hScanTree, &s);
+                    SetChildrenState(hScanTree, hit, nextSt);
+                    UpdateParentState(hScanTree, hit);
+                    g_treeUpdating = false;
+                    return TRUE; // TVS_CHECKBOXES 기본 토글 완전 억제
                 }
             }
         }
