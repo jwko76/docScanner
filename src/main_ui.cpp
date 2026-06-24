@@ -150,6 +150,7 @@ static HWND         g_hFilterCombo = nullptr;
 static HWND         g_hLoadCombo   = nullptr;
 static HWND         g_hScanTree    = nullptr;
 static bool         g_firstResult  = false;   // 첫 PII 결과 수신 여부 (실시간 탭 전환용)
+static bool         g_treeUpdating = false;  // 트리 체크 캐스케이드 재진입 방지
 // 키워드 파일 목록 (탭1)
 static std::vector<FileListItem> g_allFileItems;
 
@@ -999,8 +1000,8 @@ static std::vector<std::wstring> GetCheckedScanPaths(HWND hTree) {
             TVITEMW ti = {}; ti.mask = TVIF_STATE | TVIF_PARAM;
             ti.hItem = hItem; ti.stateMask = TVIS_STATEIMAGEMASK;
             TreeView_GetItem(hTree, &ti);
-            int chk = (ti.state >> 12) - 1; // 1=체크됨, 0=미체크
-            if (chk == 1 && ti.lParam) {
+            int chk = (ti.state & TVIS_STATEIMAGEMASK) >> 12;
+            if (chk == 2 && ti.lParam) {  // 2=완전 체크
                 auto* d = reinterpret_cast<TreeItemData*>(ti.lParam);
                 if (!d->fullPath.empty() && !d->isProtected) paths.push_back(d->fullPath);
             }
@@ -1025,6 +1026,70 @@ static std::vector<std::wstring> GetCheckedScanPaths(HWND hTree) {
         if (!isSub) result.push_back(p);
     }
     return result;
+}
+
+// ── 트리뷰 3상태 체크박스 헬퍼 ─────────────────────────────
+// 지정 노드의 모든 하위 노드를 재귀적으로 state(1=미체크,2=체크)로 설정
+static void SetChildrenState(HWND hTree, HTREEITEM hItem, int state) {
+    HTREEITEM child = TreeView_GetChild(hTree, hItem);
+    while (child) {
+        TVITEMW ti = {};
+        ti.mask = TVIF_STATE | TVIF_PARAM;
+        ti.hItem = child;
+        ti.stateMask = TVIS_STATEIMAGEMASK;
+        TreeView_GetItem(hTree, &ti);
+        bool prot = (ti.lParam && reinterpret_cast<TreeItemData*>(ti.lParam)->isProtected);
+        if (!prot) {
+            TVITEMW setTi = {};
+            setTi.mask      = TVIF_STATE;
+            setTi.hItem     = child;
+            setTi.stateMask = TVIS_STATEIMAGEMASK;
+            setTi.state     = INDEXTOSTATEIMAGEMASK(state);
+            TreeView_SetItem(hTree, &setTi);
+            SetChildrenState(hTree, child, state); // 재귀
+        }
+        child = TreeView_GetNextSibling(hTree, child);
+    }
+}
+
+// 자식들 상태를 보고 부모 노드를 all-체크/all-미체크/인디터미네이트로 업데이트
+static void UpdateParentState(HWND hTree, HTREEITEM hItem) {
+    HTREEITEM parent = TreeView_GetParent(hTree, hItem);
+    if (!parent) return;
+    bool anyChk = false, anyUnchk = false, anyMixed = false;
+    HTREEITEM child = TreeView_GetChild(hTree, parent);
+    while (child) {
+        TVITEMW ti = {};
+        ti.mask = TVIF_STATE;
+        ti.hItem = child;
+        ti.stateMask = TVIS_STATEIMAGEMASK;
+        TreeView_GetItem(hTree, &ti);
+        int st = (ti.state & TVIS_STATEIMAGEMASK) >> 12;
+        if      (st == 2) anyChk   = true;
+        else if (st == 1) anyUnchk = true;
+        else if (st == 3) anyMixed = true;
+        child = TreeView_GetNextSibling(hTree, child);
+    }
+    int newSt;
+    if (anyChk && !anyUnchk && !anyMixed)      newSt = 2; // 전체 체크
+    else if (!anyChk && !anyMixed)             newSt = 1; // 전체 미체크
+    else                                       newSt = 3; // 혼합 → 인디터미네이트
+    // 부모 노드 상태 갱신 (보호 폴더면 건너뜀)
+    TVITEMW pti = {};
+    pti.mask = TVIF_STATE | TVIF_PARAM;
+    pti.hItem = parent;
+    pti.stateMask = TVIS_STATEIMAGEMASK;
+    TreeView_GetItem(hTree, &pti);
+    bool prot = (pti.lParam && reinterpret_cast<TreeItemData*>(pti.lParam)->isProtected);
+    if (!prot) {
+        TVITEMW setTi = {};
+        setTi.mask      = TVIF_STATE;
+        setTi.hItem     = parent;
+        setTi.stateMask = TVIS_STATEIMAGEMASK;
+        setTi.state     = INDEXTOSTATEIMAGEMASK(newSt);
+        TreeView_SetItem(hTree, &setTi);
+    }
+    UpdateParentState(hTree, parent); // 상위로 재귀
 }
 
 // ============================================================
@@ -1081,11 +1146,35 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         mkLabel(L"스캔 경로  (체크 없으면 전체 드라이브 탐색):", M, y, 330, 18);
         hScanTree = CreateWindowExW(WS_EX_CLIENTEDGE, WC_TREEVIEWW, L"",
             WS_CHILD | WS_VISIBLE | WS_VSCROLL |
-            TVS_HASLINES | TVS_HASBUTTONS | TVS_LINESATROOT | TVS_CHECKBOXES,
+            TVS_HASLINES | TVS_HASBUTTONS | TVS_LINESATROOT,
             M, y + 20, W - 24, 122,
             hwnd, (HMENU)IDC_SCAN_TREE, nullptr, nullptr);
         SendMessageW(hScanTree, WM_SETFONT, (WPARAM)hF, TRUE);
         g_hScanTree = hScanTree;
+        // TVS_CHECKBOXES를 동적으로 추가해야 GetImageList가 즉시 유효한 핸들 반환
+        {
+            LONG_PTR ts = GetWindowLongPtrW(hScanTree, GWL_STYLE);
+            SetWindowLongPtrW(hScanTree, GWL_STYLE, ts | TVS_CHECKBOXES);
+            // 상태 이미지 리스트에 인디터미네이트(index 3) 이미지 추가
+            HIMAGELIST himl = TreeView_GetImageList(hScanTree, TVSIL_STATE);
+            if (himl) {
+                int iw = 16, ih = 16;
+                ImageList_GetIconSize(himl, &iw, &ih);
+                HDC hdc2  = GetDC(hScanTree);
+                HDC mdc   = CreateCompatibleDC(hdc2);
+                HBITMAP bm   = CreateCompatibleBitmap(hdc2, iw, ih);
+                HBITMAP old2 = (HBITMAP)SelectObject(mdc, bm);
+                RECT ir = {0, 0, iw, ih};
+                FillRect(mdc, &ir, GetSysColorBrush(COLOR_WINDOW));
+                // 3-state 체크박스 = 회색 사각형 (흐릿한 인디터미네이트)
+                DrawFrameControl(mdc, &ir, DFC_BUTTON, DFCS_BUTTON3STATE | DFCS_CHECKED);
+                SelectObject(mdc, old2);
+                ImageList_AddMasked(himl, bm, GetSysColor(COLOR_WINDOW));
+                DeleteObject(bm);
+                DeleteDC(mdc);
+                ReleaseDC(hScanTree, hdc2);
+            }
+        }
         PopulateScanTree(hScanTree);
         y += 20 + 122 + 6;  // 148
 
@@ -1705,11 +1794,21 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (hdr->code == TVN_ITEMEXPANDING) {
                 auto* pnmtv = reinterpret_cast<NMTREEVIEWW*>(lParam);
                 if (pnmtv->action == TVE_EXPAND) {
-                    TVITEMW ti = {}; ti.mask = TVIF_PARAM; ti.hItem = pnmtv->itemNew.hItem;
+                    TVITEMW ti = {};
+                    ti.mask = TVIF_STATE | TVIF_PARAM;
+                    ti.hItem = pnmtv->itemNew.hItem;
+                    ti.stateMask = TVIS_STATEIMAGEMASK;
                     TreeView_GetItem(hScanTree, &ti);
                     if (ti.lParam) {
                         auto* d = reinterpret_cast<TreeItemData*>(ti.lParam);
                         ExpandScanTreeNode(hScanTree, pnmtv->itemNew.hItem, d->fullPath);
+                        // 부모가 완전 체크(2)이면 새로 추가된 자식들도 체크
+                        int pst = (ti.state & TVIS_STATEIMAGEMASK) >> 12;
+                        if (pst == 2) {
+                            g_treeUpdating = true;
+                            SetChildrenState(hScanTree, pnmtv->itemNew.hItem, 2);
+                            g_treeUpdating = false;
+                        }
                     }
                 }
             }
@@ -1727,6 +1826,20 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 auto* pnmtv = reinterpret_cast<NMTREEVIEWW*>(lParam);
                 if (pnmtv->itemOld.lParam)
                     delete reinterpret_cast<TreeItemData*>(pnmtv->itemOld.lParam);
+            }
+            // 체크 변경 후: 자식 전파 + 부모 3상태 업데이트
+            if (hdr->code == TVN_ITEMCHANGED && !g_treeUpdating) {
+                auto* p2 = reinterpret_cast<NMTVITEMCHANGE*>(lParam);
+                if (p2->uChanged & TVIF_STATE) {
+                    int newSt = (p2->uStateNew & TVIS_STATEIMAGEMASK) >> 12;
+                    int oldSt = (p2->uStateOld & TVIS_STATEIMAGEMASK) >> 12;
+                    if (newSt != oldSt && (newSt == 1 || newSt == 2)) {
+                        g_treeUpdating = true;
+                        SetChildrenState(hScanTree, p2->hItem, newSt);
+                        UpdateParentState(hScanTree, p2->hItem);
+                        g_treeUpdating = false;
+                    }
+                }
             }
         }
 
